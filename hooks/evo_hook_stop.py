@@ -55,48 +55,109 @@ def infer_domain(changed_files):
 
 
 def extract_skills(output, changed_files, outcome):
-    """Extract skill entries from session output."""
+    """Extract skill entries from session output.
+
+    Captures: file operations, framework usage, tool commands,
+    error patterns, and Chinese output patterns.
+    """
     skills = []
     domain = infer_domain(changed_files)
 
-    if not output or len(output) < 20:
+    if not output or len(output) < 10:
         return skills
 
     lower = output.lower()
 
-    # Pattern: successful task completion
-    success_patterns = [
-        (r"(?:created?|added?|implemented?|fixed?|updated?)\s+(.+)", "task_execution"),
-        (r"(?:test|tests?)\s+(?:passed|passing|run|running)", "testing"),
-        (r"(?:deploy|deployed?|pushed?|shipped?)", "deployment"),
-        (r"(?:refactor|refactored?)", "refactoring"),
-        (r"(?:bug\s+fix|fixed\s+bug|resolved?\s+issue)", "debugging"),
+    # 1. File operation patterns (most reliable)
+    file_ops = [
+        (r"(?:created?|wrote?|编写|创建)\s+(?:a\s+)?(?:new\s+)?(?:file|脚本|模块|文件)\s*[:\-]?\s*(.+)", "file_creation"),
+        (r"(?:edited?|modified?|updated?|修改|更新)\s+(.+)", "file_edit"),
+        (r"(?:deleted?|removed?|删除)\s+(.+)", "file_removal"),
     ]
-
-    for pattern, skill_type in success_patterns:
+    for pattern, skill_type in file_ops:
         matches = re.findall(pattern, lower)
-        for match in matches[:2]:
-            skill_text = match.strip()[:100]
-            if len(skill_text) > 10:
+        for m in matches[:2]:
+            text = m.strip()[:100]
+            if len(text) > 5:
                 skills.append({
-                    "name": f"{skill_type}_{skill_text[:30]}",
+                    "name": f"{skill_type}_{text[:30]}",
                     "domain": domain,
-                    "pattern": skill_text,
+                    "pattern": text,
                     "weight": 1.0 if outcome == "success" else 0.5,
                 })
 
-    # Pattern: error encountered and resolved
-    if outcome == "success" and "error" in lower:
-        error_patterns = re.findall(r"(?:error|exception|traceback).{0,100}", lower)
-        for ep in error_patterns[:1]:
+    # 2. Framework/library usage
+    framework_patterns = [
+        (r"(?:used?|using|使用)\s+(fastapi|flask|django|react|vue|express|gin|axum|actix)", "framework_use"),
+        (r"(?:installed?|安装)\s+(\w+)", "tool_install"),
+        (r"(?:pip|npm|cargo|go)\s+(?:install|add)\s+(\S+)", "package_install"),
+    ]
+    for pattern, skill_type in framework_patterns:
+        matches = re.findall(pattern, lower)
+        for m in matches[:2]:
+            text = m.strip()[:80]
+            if len(text) > 2:
+                skills.append({
+                    "name": f"{skill_type}_{text[:30]}",
+                    "domain": domain,
+                    "pattern": text,
+                    "weight": 0.9,
+                })
+
+    # 3. Task completion (broad patterns)
+    task_patterns = [
+        (r"(?:完成|done|completed?|finished?|搞定|实现|implement).{0,80}", "task_complete"),
+        (r"(?:修复|fix(?:ed|ing)?|解决|resolve).{0,80}", "bug_fix"),
+        (r"(?:重构|refactor).{0,80}", "refactoring"),
+        (r"(?:部署|deploy).{0,80}", "deployment"),
+        (r"(?:测试|test(?:ing|ed)?).{0,80}", "testing"),
+        (r"(?:优化|optimiz).{0,80}", "optimization"),
+    ]
+    for pattern, skill_type in task_patterns:
+        matches = re.findall(pattern, lower)
+        for m in matches[:1]:
+            text = m.strip()[:100]
+            if len(text) > 8:
+                skills.append({
+                    "name": f"{skill_type}_{text[:30]}",
+                    "domain": domain,
+                    "pattern": text,
+                    "weight": 1.0 if outcome == "success" else 0.5,
+                })
+
+    # 4. Error recovery (if succeeded despite errors)
+    if outcome == "success" and ("error" in lower or "exception" in lower or "错误" in lower):
+        error_bits = re.findall(r"(?:error|exception|traceback|错误|异常).{0,80}", lower)
+        for eb in error_bits[:1]:
             skills.append({
                 "name": f"error_recovery_{domain}",
                 "domain": domain,
-                "pattern": f"Resolved: {ep[:80]}",
+                "pattern": f"Resolved: {eb[:80]}",
                 "weight": 0.8,
             })
 
-    return skills[:5]  # Max 5 skills per session
+    # 5. Changed files as skills (always capture what was worked on)
+    if changed_files and outcome == "success":
+        for f in changed_files[:3]:
+            fname = f.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]  # basename
+            if len(fname) > 3:
+                skills.append({
+                    "name": f"worked_on_{fname[:30]}",
+                    "domain": domain,
+                    "pattern": f"Modified {fname}",
+                    "weight": 0.7,
+                })
+
+    # Deduplicate by name prefix
+    seen = set()
+    unique = []
+    for s in skills:
+        key = s["name"][:20]
+        if key not in seen:
+            seen.add(key)
+            unique.append(s)
+
+    return unique[:5]  # Max 5 skills per session
 
 
 def main():

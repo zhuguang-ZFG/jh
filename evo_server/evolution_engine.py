@@ -144,7 +144,10 @@ def analyze_recent_sessions(days: int = 7) -> dict:
 
 def generate_proposals(analysis):
     # type: (dict) -> List[Dict]
-    """Generate evolution proposals based on session analysis."""
+    """Generate evolution proposals based on session analysis.
+
+    Generates proposals for BOTH failure and success paths.
+    """
     proposals = []
     if analysis["total"] < config.EVIDENCE_MIN:
         logger.info(f"Not enough evidence ({analysis['total']}/{config.EVIDENCE_MIN})")
@@ -168,14 +171,29 @@ def generate_proposals(analysis):
     # 2. High pass rate + lessons → promote lessons to skills
     if pass_rate >= config.PASS_RATE_MIN and analysis["lessons"]:
         for lesson in analysis["lessons"][:3]:
+            if lesson and len(lesson) > 10:
+                proposals.append({
+                    "category": "skill",
+                    "summary": f"Promote lesson to skill: {lesson[:200]}",
+                    "evidence_ids": analysis["evidence_ids"],
+                    "confidence": round(pass_rate * 0.8, 2),
+                })
+
+    # 3. High success rate → formalize as proven technique
+    if pass_rate >= 0.9 and analysis["total"] >= config.EVIDENCE_MIN:
+        top_domains = [d[0] for d in analysis["top_domains"][:3]]
+        if top_domains:
             proposals.append({
                 "category": "skill",
-                "summary": f"Promote lesson to skill: {lesson[:200]}",
+                "summary": (
+                    f"High success rate ({pass_rate:.0%}) across {analysis['total']} sessions. "
+                    f"Formalize {', '.join(top_domains)} expertise as proven techniques."
+                ),
                 "evidence_ids": analysis["evidence_ids"],
-                "confidence": round(pass_rate * 0.8, 2),
+                "confidence": round(pass_rate * 0.9, 2),
             })
 
-    # 3. Tool imbalance → suggest diversification
+    # 4. Tool imbalance → suggest diversification
     tools = analysis["tools"]
     if len(tools) == 1 and analysis["total"] >= 5:
         only_tool = list(tools.keys())[0]
@@ -189,7 +207,7 @@ def generate_proposals(analysis):
             "confidence": 0.4,
         })
 
-    # 4. Domain concentration → suggest exploration
+    # 5. Domain concentration → suggest exploration
     domains = analysis["top_domains"]
     if domains and domains[0][1] > analysis["total"] * 0.7:
         top = domains[0][0]
@@ -198,6 +216,19 @@ def generate_proposals(analysis):
             "summary": (
                 f"{domains[0][1]}/{analysis['total']} sessions focused on {top}. "
                 f"Consider exploring other domains for well-rounded growth."
+            ),
+            "evidence_ids": analysis["evidence_ids"],
+            "confidence": 0.5,
+        })
+
+    # 6. Enough evidence but no proposals yet → generate a general review
+    if not proposals and analysis["total"] >= config.EVIDENCE_MIN:
+        proposals.append({
+            "category": "strategy",
+            "summary": (
+                f"{analysis['total']} sessions analyzed, {pass_rate:.0%} success rate. "
+                f"Top domains: {', '.join(d[0] for d in analysis['top_domains'][:3])}. "
+                f"System operating well — continue monitoring for patterns."
             ),
             "evidence_ids": analysis["evidence_ids"],
             "confidence": 0.5,
