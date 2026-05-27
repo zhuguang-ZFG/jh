@@ -468,3 +468,103 @@ def get_session_id():
     from datetime import date
     raw = f"{getpass.getuser()}:{date.today().isoformat()}"
     return "s-" + hashlib.sha256(raw.encode()).hexdigest()[:12]
+
+
+# ── Injection accumulator (Phase 3) ──────────────────────────
+
+INJECTION_FILE = os.path.join(tempfile.gettempdir(), "evo_injections.json")
+INJECTION_DEBOUNCE = 300  # seconds between injections
+
+
+def record_injection(sections, failure_count=0, skill_count=0,
+                     pattern_count=0, has_fix_code=False, domain=""):
+    """Accumulate injection data in a temp file. Called by context hooks.
+
+    Data is flushed with the real session_id when the Stop hook fires.
+    """
+    import time
+    now = time.time()
+
+    # Debounce: skip if last injection was < 5 min ago
+    try:
+        if os.path.exists(INJECTION_FILE):
+            with open(INJECTION_FILE) as f:
+                data = json.load(f)
+            if data and (now - data[-1].get("ts", 0)) < INJECTION_DEBOUNCE:
+                return
+    except Exception:
+        data = []
+    else:
+        if not isinstance(data, list):
+            data = []
+
+    data.append({
+        "sections": sections,
+        "failure_count": failure_count,
+        "skill_count": skill_count,
+        "pattern_count": pattern_count,
+        "has_fix_code": has_fix_code,
+        "domain": domain,
+        "ts": now,
+    })
+
+    try:
+        with open(INJECTION_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+
+def flush_injections(real_session_id):
+    """Send accumulated injections to evo-server with the real session_id.
+
+    Called by the Stop hook when the real session_id is available.
+    Returns number of injections flushed.
+    """
+    if not os.path.exists(INJECTION_FILE):
+        return 0
+
+    try:
+        with open(INJECTION_FILE) as f:
+            data = json.load(f)
+    except Exception:
+        return 0
+
+    if not data or not isinstance(data, list):
+        return 0
+
+    # Merge all injections into one summary (per-session)
+    all_sections = set()
+    total_failures = 0
+    total_skills = 0
+    total_patterns = 0
+    any_fix_code = False
+    domain = ""
+
+    for entry in data:
+        all_sections.update(entry.get("sections", []))
+        total_failures += entry.get("failure_count", 0)
+        total_skills += entry.get("skill_count", 0)
+        total_patterns += entry.get("pattern_count", 0)
+        if entry.get("has_fix_code"):
+            any_fix_code = True
+        if entry.get("domain") and not domain:
+            domain = entry["domain"]
+
+    result = api("POST", "/context/log-injection", {
+        "session_id": real_session_id,
+        "sections": sorted(all_sections),
+        "failure_count": min(total_failures, 50),
+        "skill_count": min(total_skills, 50),
+        "pattern_count": min(total_patterns, 50),
+        "has_fix_code": any_fix_code,
+        "domain": domain,
+    })
+
+    # Clean up
+    try:
+        os.remove(INJECTION_FILE)
+    except Exception:
+        pass
+
+    return 1 if result.get("ok") else 0

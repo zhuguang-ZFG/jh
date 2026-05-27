@@ -14,19 +14,24 @@ logger = logging.getLogger("evo.effect")
 
 
 def compute_effect_metrics(conn) -> Dict:
-    """Compute effect metrics from context_injections + sessions tables."""
+    """Compute effect metrics from context_injections + sessions tables.
+
+    Only considers injections with real session_ids (from Stop hook flush).
+    Pseudo session_ids (s-*) from in-flight sessions are excluded.
+    """
     now = time.time()
     cutoff_30d = now - 30 * 86400
 
-    # 1. Get sessions with context injection (last 30 days)
-    injected_sessions = conn.execute(
+    # 1. Get injections with REAL session_ids (flushed by Stop hook)
+    #    Real session_ids: UUID format or any non "s-" prefixed
+    injected_rows = conn.execute(
         """SELECT DISTINCT session_id FROM context_injections
-           WHERE created_at > ?""",
+           WHERE created_at > ? AND session_id NOT LIKE 's-%'""",
         (cutoff_30d,),
     ).fetchall()
-    injected_ids = {r["session_id"] for r in injected_sessions}
+    injected_ids = {r["session_id"] for r in injected_rows}
 
-    # 2. Get all sessions (last 30 days)
+    # 2. Get all sessions (last 30 days, exclude partial)
     all_sessions = conn.execute(
         """SELECT session_id, outcome FROM sessions
            WHERE created_at > ? AND outcome != 'partial'""",
@@ -35,7 +40,9 @@ def compute_effect_metrics(conn) -> Dict:
 
     with_ctx = []
     without_ctx = []
+    session_outcomes = {}
     for s in all_sessions:
+        session_outcomes[s["session_id"]] = s["outcome"]
         if s["session_id"] in injected_ids:
             with_ctx.append(s["outcome"])
         else:
@@ -53,20 +60,17 @@ def compute_effect_metrics(conn) -> Dict:
 
     # 4. Per-section contribution
     section_stats = conn.execute(
-        """SELECT sections, failure_count, skill_count, pattern_count,
-                  has_fix_code, session_id
-           FROM context_injections WHERE created_at > ?""",
+        """SELECT sections, session_id FROM context_injections
+           WHERE created_at > ? AND session_id NOT LIKE 's-%'""",
         (cutoff_30d,),
     ).fetchall()
 
-    section_outcomes = {}  # section -> {"with": int, "success": int}
-    session_outcomes = {}
-    for s in all_sessions:
-        session_outcomes[s["session_id"]] = s["outcome"]
-
+    section_outcomes = {}
     for row in section_stats:
         sid = row["session_id"]
         outcome = session_outcomes.get(sid, "")
+        if not outcome:
+            continue  # no matching session — skip
         try:
             sections = json.loads(row["sections"])
         except Exception:
@@ -81,15 +85,23 @@ def compute_effect_metrics(conn) -> Dict:
 
     top_sections = {}
     for section, stats in section_outcomes.items():
-        if stats["total"] >= 2:
+        if stats["total"] >= 1:
             rate = stats["success"] / stats["total"]
             top_sections[section] = {
                 "success_rate": round(rate, 3),
                 "sessions": stats["total"],
+                "lift_vs_baseline": round(rate - without_rate, 3),
             }
 
     # 5. fix_code impact — do failures with fix_code recur less?
     fix_impact = _compute_fix_impact(conn, cutoff_30d)
+
+    # 6. Injection frequency stats
+    total_injections = conn.execute(
+        """SELECT COUNT(*) c FROM context_injections WHERE created_at > ?""",
+        (cutoff_30d,),
+    ).fetchone()["c"]
+    real_injections = len(injected_ids)
 
     return {
         "period_days": 30,
@@ -101,6 +113,10 @@ def compute_effect_metrics(conn) -> Dict:
         "lift": round(lift, 3),
         "by_section": top_sections,
         "fix_code_impact": fix_impact,
+        "injection_stats": {
+            "total_records": total_injections,
+            "with_real_session": real_injections,
+        },
     }
 
 
@@ -139,7 +155,6 @@ def run_daily_effect_analysis(conn) -> Dict:
     metrics = compute_effect_metrics(conn)
     now = time.time()
 
-    # Store daily snapshot
     from datetime import datetime
     today = datetime.utcnow().strftime("%Y-%m-%d")
 

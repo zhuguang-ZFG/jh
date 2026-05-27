@@ -317,31 +317,8 @@ def refresh_claude_md(project_root):
                 pass
 
 
-_INJECTION_LOG_TTL = 300  # log at most once per 5 min
-
-
-def _log_injection(all_data, domain):
-    """Log context injection to evo-server for effect tracking."""
-    # Debounce: check if we logged recently
-    cache_file = os.path.join(CACHE_DIR, "_injection_log_ts")
-    try:
-        if os.path.isfile(cache_file):
-            with open(cache_file) as f:
-                last_ts = float(f.read().strip())
-            if time.time() - last_ts < _INJECTION_LOG_TTL:
-                return
-    except Exception:
-        pass
-
-    # Save timestamp
-    try:
-        os.makedirs(CACHE_DIR, exist_ok=True)
-        with open(cache_file, "w") as f:
-            f.write(str(time.time()))
-    except Exception:
-        pass
-
-    # Build injection data
+def _accumulate_injection(all_data, domain):
+    """Accumulate injection data for later flush with real session_id."""
     sections = []
     failure_count = len(all_data.get("failures", []))
     skill_count = len(all_data.get("skills", []))
@@ -363,27 +340,25 @@ def _log_injection(all_data, domain):
     if all_data.get("best_practices"):
         sections.append("best_practices")
 
-    # Generate pseudo session_id (date + domain)
-    import hashlib
-    session_id = hashlib.sha256(
-        f"{time.strftime('%Y-%m-%d')}:{domain}".encode()
-    ).hexdigest()[:12]
+    if not sections:
+        return
 
-    # Non-blocking POST
-    import threading
-
-    def _do_post():
-        api_post("/context/log-injection", {
-            "session_id": session_id,
-            "sections": sections,
-            "failure_count": failure_count,
-            "skill_count": skill_count,
-            "pattern_count": pattern_count,
-            "has_fix_code": has_fix_code,
-            "domain": domain or "",
-        })
-
-    threading.Thread(target=_do_post, daemon=True).start()
+    try:
+        # Add parent dir to path for evo_hook_common import
+        parent = os.path.dirname(os.path.abspath(__file__))
+        if parent not in sys.path:
+            sys.path.insert(0, parent)
+        from evo_hook_common import record_injection
+        record_injection(
+            sections=sections,
+            failure_count=failure_count,
+            skill_count=skill_count,
+            pattern_count=pattern_count,
+            has_fix_code=has_fix_code,
+            domain=domain or "",
+        )
+    except ImportError:
+        pass  # evo_hook_common not available
 
 
 def main():
@@ -445,8 +420,8 @@ def main():
     context_text = format_context(all_data)
     if context_text:
         print(context_text)
-        # Phase 3: log injection for effect tracking (non-blocking, debounced)
-        _log_injection(all_data, lang)
+        # Phase 3: accumulate injection data for effect tracking
+        _accumulate_injection(all_data, lang)
 
     # Auto-refresh CLAUDE.md (non-blocking, runs occasionally)
     project_root = os.path.dirname(os.path.dirname(file_path))

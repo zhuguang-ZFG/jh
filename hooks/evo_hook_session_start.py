@@ -116,12 +116,12 @@ def main():
     context = format_context(data)
     if context:
         print(context)
-        # Phase 3: log injection for effect tracking (non-blocking)
-        _log_injection(data)
+        # Phase 3: accumulate injection for effect tracking
+        _accumulate_injection(data)
 
 
-def _log_injection(data):
-    """Log session-start injection for effect tracking."""
+def _accumulate_injection(data):
+    """Accumulate injection data for later flush with real session_id."""
     sections = []
     if data.get("failures"):
         sections.append("failures")
@@ -134,21 +134,24 @@ def _log_injection(data):
     if data.get("best_practices"):
         sections.append("best_practices")
 
-    session_id = f"start-{int(time.time()) // 3600}"  # hourly bucket
+    if not sections:
+        return
 
-    import threading
-
-    def _do_post():
-        api_post("/context/log-injection", {
-            "session_id": session_id,
-            "sections": sections,
-            "failure_count": len(data.get("failures", [])),
-            "skill_count": len(data.get("skills", [])),
-            "pattern_count": len(data.get("patterns", [])),
-            "has_fix_code": any(f.get("fix_code") for f in data.get("failures", [])),
-        })
-
-    threading.Thread(target=_do_post, daemon=True).start()
+    try:
+        import sys as _sys
+        parent = os.path.dirname(os.path.abspath(__file__))
+        if parent not in _sys.path:
+            _sys.path.insert(0, parent)
+        from evo_hook_common import record_injection
+        record_injection(
+            sections=sections,
+            failure_count=len(data.get("failures", [])),
+            skill_count=len(data.get("skills", [])),
+            pattern_count=len(data.get("patterns", [])),
+            has_fix_code=any(f.get("fix_code") for f in data.get("failures", [])),
+        )
+    except ImportError:
+        pass
 
 
 if __name__ == "__main__":

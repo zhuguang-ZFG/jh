@@ -15,7 +15,7 @@ import subprocess
 
 from evo_hook_common import (
     api, parse_transcript, infer_domain, extract_skills, extract_memories,
-    read_changed_files, TRACKER_FILE,
+    read_changed_files, flush_injections, TRACKER_FILE,
 )
 
 
@@ -151,11 +151,14 @@ def main():
             bd = batch_result.get("data", {})
             skills_saved = bd.get("created", 0) + bd.get("updated", 0)
 
+    # Flush accumulated injection data with real session_id
+    injections_flushed = flush_injections(session_id)
+
     if result.get("ok"):
         msg = (
             f"[evo] Session {session_id[:12]} logged "
             f"({outcome}, {len(changed_files)} files, "
-            f"{skills_saved} skills extracted)"
+            f"{skills_saved} skills, {injections_flushed} injection)"
         )
         print(msg, file=sys.stderr)
 
