@@ -104,6 +104,12 @@ def _start_scheduler():
             id="retroactive_fix_generation",
         )
 
+        # Effect analysis: 08:00 UTC (16:00 CST), daily
+        _scheduler.add_job(
+            _run_effect_analysis_job, "cron", hour=8, minute=0,
+            id="effect_analysis",
+        )
+
         _scheduler.start()
         logger.info("APScheduler started (weekly_evolution + daily_maintenance + quality_report + skill_refinement)")
     except ImportError:
@@ -341,6 +347,21 @@ async def _async_fix_generation():
 
     conn.commit()
     logger.info(f"Fix generation: {generated}/{len(rows)} succeeded")
+
+
+def _run_effect_analysis_job():
+    """Daily effect analysis — compute context injection effectiveness."""
+    try:
+        from .effect_tracker import run_daily_effect_analysis
+        from .db import get_conn
+        conn = get_conn()
+        result = run_daily_effect_analysis(conn)
+        logger.info(
+            f"Effect analysis: lift={result['lift']:.3f}, "
+            f"sessions={result['total_sessions']}"
+        )
+    except Exception as e:
+        logger.error(f"Effect analysis failed: {e}")
 
 
 app = FastAPI(title="Evo-Server", version="0.1.0", lifespan=lifespan)

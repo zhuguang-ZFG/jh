@@ -116,6 +116,39 @@ def main():
     context = format_context(data)
     if context:
         print(context)
+        # Phase 3: log injection for effect tracking (non-blocking)
+        _log_injection(data)
+
+
+def _log_injection(data):
+    """Log session-start injection for effect tracking."""
+    sections = []
+    if data.get("failures"):
+        sections.append("failures")
+    if data.get("skills"):
+        sections.append("skills")
+    if data.get("patterns"):
+        sections.append("patterns")
+    if data.get("memories"):
+        sections.append("memories")
+    if data.get("best_practices"):
+        sections.append("best_practices")
+
+    session_id = f"start-{int(time.time()) // 3600}"  # hourly bucket
+
+    import threading
+
+    def _do_post():
+        api_post("/context/log-injection", {
+            "session_id": session_id,
+            "sections": sections,
+            "failure_count": len(data.get("failures", [])),
+            "skill_count": len(data.get("skills", [])),
+            "pattern_count": len(data.get("patterns", [])),
+            "has_fix_code": any(f.get("fix_code") for f in data.get("failures", [])),
+        })
+
+    threading.Thread(target=_do_post, daemon=True).start()
 
 
 if __name__ == "__main__":

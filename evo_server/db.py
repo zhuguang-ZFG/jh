@@ -184,6 +184,32 @@ CREATE TABLE IF NOT EXISTS memories (
     last_used REAL DEFAULT 0
 );
 
+-- Context injections (effect tracking)
+CREATE TABLE IF NOT EXISTS context_injections (
+    id INTEGER PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    sections TEXT DEFAULT '[]',       -- JSON: which sections were injected
+    failure_count INTEGER DEFAULT 0,
+    skill_count INTEGER DEFAULT 0,
+    pattern_count INTEGER DEFAULT 0,
+    has_fix_code INTEGER DEFAULT 0,   -- 1 if any failure had fix_code
+    domain TEXT DEFAULT '',
+    created_at REAL NOT NULL
+);
+
+-- Effect metrics (daily aggregated)
+CREATE TABLE IF NOT EXISTS effect_metrics (
+    id INTEGER PRIMARY KEY,
+    metric_date TEXT NOT NULL,        -- YYYY-MM-DD
+    with_context INTEGER DEFAULT 0,   -- sessions with context injection
+    without_context INTEGER DEFAULT 0,
+    with_context_success INTEGER DEFAULT 0,
+    without_context_success INTEGER DEFAULT 0,
+    lift REAL DEFAULT 0,              -- success rate difference
+    top_sections TEXT DEFAULT '{}',   -- JSON: section -> contribution score
+    created_at REAL NOT NULL
+);
+
 -- Shared knowledge (cross-project sharing)
 CREATE TABLE IF NOT EXISTS shared_knowledge (
     id INTEGER PRIMARY KEY,
@@ -223,6 +249,9 @@ CREATE INDEX IF NOT EXISTS idx_shared_knowledge_type ON shared_knowledge(knowled
 CREATE INDEX IF NOT EXISTS idx_shared_knowledge_project ON shared_knowledge(project_name);
 CREATE INDEX IF NOT EXISTS idx_memories_domain ON memories(domain);
 CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
+CREATE INDEX IF NOT EXISTS idx_context_injections_session ON context_injections(session_id);
+CREATE INDEX IF NOT EXISTS idx_context_injections_created ON context_injections(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_effect_metrics_date ON effect_metrics(metric_date);
 
 -- Composite indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_prompt_outcomes_strategy_created ON prompt_outcomes(strategy, created_at);

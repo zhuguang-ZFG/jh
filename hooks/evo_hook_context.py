@@ -317,6 +317,75 @@ def refresh_claude_md(project_root):
                 pass
 
 
+_INJECTION_LOG_TTL = 300  # log at most once per 5 min
+
+
+def _log_injection(all_data, domain):
+    """Log context injection to evo-server for effect tracking."""
+    # Debounce: check if we logged recently
+    cache_file = os.path.join(CACHE_DIR, "_injection_log_ts")
+    try:
+        if os.path.isfile(cache_file):
+            with open(cache_file) as f:
+                last_ts = float(f.read().strip())
+            if time.time() - last_ts < _INJECTION_LOG_TTL:
+                return
+    except Exception:
+        pass
+
+    # Save timestamp
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(cache_file, "w") as f:
+            f.write(str(time.time()))
+    except Exception:
+        pass
+
+    # Build injection data
+    sections = []
+    failure_count = len(all_data.get("failures", []))
+    skill_count = len(all_data.get("skills", []))
+    pattern_count = len(all_data.get("patterns", []))
+    has_fix_code = any(
+        f.get("fix_code") for f in all_data.get("failures", [])
+    )
+
+    if failure_count:
+        sections.append("failures")
+    if skill_count:
+        sections.append("skills")
+    if pattern_count:
+        sections.append("patterns")
+    if all_data.get("conventions"):
+        sections.append("conventions")
+    if all_data.get("memories"):
+        sections.append("memories")
+    if all_data.get("best_practices"):
+        sections.append("best_practices")
+
+    # Generate pseudo session_id (date + domain)
+    import hashlib
+    session_id = hashlib.sha256(
+        f"{time.strftime('%Y-%m-%d')}:{domain}".encode()
+    ).hexdigest()[:12]
+
+    # Non-blocking POST
+    import threading
+
+    def _do_post():
+        api_post("/context/log-injection", {
+            "session_id": session_id,
+            "sections": sections,
+            "failure_count": failure_count,
+            "skill_count": skill_count,
+            "pattern_count": pattern_count,
+            "has_fix_code": has_fix_code,
+            "domain": domain or "",
+        })
+
+    threading.Thread(target=_do_post, daemon=True).start()
+
+
 def main():
     # Read stdin — Claude Code passes tool input JSON
     try:
@@ -376,6 +445,8 @@ def main():
     context_text = format_context(all_data)
     if context_text:
         print(context_text)
+        # Phase 3: log injection for effect tracking (non-blocking, debounced)
+        _log_injection(all_data, lang)
 
     # Auto-refresh CLAUDE.md (non-blocking, runs occasionally)
     project_root = os.path.dirname(os.path.dirname(file_path))

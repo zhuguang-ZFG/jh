@@ -280,6 +280,52 @@ def batch_context(q: ContextBatchRequest):
     return ApiResponse(ok=True, data=data)
 
 
+# ── Context injection logging (Phase 3: effect tracking) ──────
+
+class InjectionLogRequest(BaseModel):
+    session_id: str
+    sections: List[str] = Field(default_factory=list)
+    failure_count: int = 0
+    skill_count: int = 0
+    pattern_count: int = 0
+    has_fix_code: bool = False
+    domain: str = ""
+
+
+@router.post("/log-injection")
+def log_injection(req: InjectionLogRequest):
+    """Record a context injection event for effect tracking."""
+    conn = get_conn()
+    now = time.time()
+    conn.execute(
+        """INSERT INTO context_injections
+           (session_id, sections, failure_count, skill_count, pattern_count,
+            has_fix_code, domain, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            req.session_id,
+            json.dumps(req.sections),
+            req.failure_count,
+            req.skill_count,
+            req.pattern_count,
+            1 if req.has_fix_code else 0,
+            req.domain,
+            now,
+        ),
+    )
+    conn.commit()
+    return ApiResponse(ok=True, message="Injection logged")
+
+
+@router.get("/effect")
+def get_effect_metrics():
+    """Return effect tracking metrics — does context injection help?"""
+    from .effect_tracker import compute_effect_metrics
+    conn = get_conn()
+    metrics = compute_effect_metrics(conn)
+    return ApiResponse(ok=True, data=metrics)
+
+
 # ── Helpers ───────────────────────────────────────────────────
 
 def _extract_keywords(text):
