@@ -310,12 +310,15 @@ def _extract_keywords(text):
 
 def _format_skill(row):
     r = dict(row)
-    return {
+    result = {
         "name": r["name"],
         "domain": r["domain"],
         "weight": round(r.get("weight", 1.0), 2),
         "pattern": r.get("pattern", "")[:200],
     }
+    if r.get("code_example"):
+        result["code_example"] = r["code_example"][:300]
+    return result
 
 
 def _format_pattern(row):

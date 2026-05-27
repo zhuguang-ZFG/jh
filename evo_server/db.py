@@ -253,6 +253,16 @@ def get_conn() -> sqlite3.Connection:
             except Exception:
                 pass  # column already exists
 
+        # Phase 2: git_diff on sessions, code_example on skills
+        for table, col, typedef in [
+            ("sessions", "git_diff", "TEXT DEFAULT ''"),
+            ("skills", "code_example", "TEXT DEFAULT ''"),
+        ]:
+            try:
+                _conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typedef}")
+            except Exception:
+                pass
+
         # Load sqlite-vec extension + create vec tables
         _init_vec_tables(_conn)
     return _conn

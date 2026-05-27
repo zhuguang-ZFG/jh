@@ -11,10 +11,33 @@ import os
 import tempfile
 from datetime import datetime
 
+import subprocess
+
 from evo_hook_common import (
     api, parse_transcript, infer_domain, extract_skills, extract_memories,
     read_changed_files, TRACKER_FILE,
 )
+
+
+def _capture_git_diff(changed_files):
+    """Capture git diff for changed files (max 8KB)."""
+    if not changed_files:
+        return ""
+    try:
+        # Get diff for specific files, or full diff if too many
+        if len(changed_files) <= 20:
+            cmd = ["git", "diff", "HEAD~1", "--"] + changed_files
+        else:
+            cmd = ["git", "diff", "HEAD~1"]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8",
+            timeout=10, errors="replace",
+        )
+        if result.returncode == 0 and result.stdout:
+            return result.stdout[:8192]  # cap at 8KB
+    except Exception:
+        pass
+    return ""
 
 
 def main():
@@ -37,6 +60,9 @@ def main():
             os.remove(TRACKER_FILE)
         except Exception:
             pass
+
+    # Capture git diff for skill extraction (Phase 2)
+    git_diff = _capture_git_diff(changed_files)
 
     # Parse transcript for rich data
     transcript_data = parse_transcript(transcript_path)
@@ -105,6 +131,7 @@ def main():
         "lessons": lessons,
         "changed_files": changed_files,
         "duration_sec": 0,
+        "git_diff": git_diff,
     })
 
     # Extract and save skills

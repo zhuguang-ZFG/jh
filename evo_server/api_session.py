@@ -20,8 +20,8 @@ def log_session(s: SessionLog):
     try:
         conn.execute(
             """INSERT INTO sessions (session_id, tool, goal, outcome, changed_files,
-                                     lessons, duration_sec, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                                     lessons, duration_sec, git_diff, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 s.session_id,
                 s.tool,
@@ -30,6 +30,7 @@ def log_session(s: SessionLog):
                 json.dumps(s.changed_files),
                 s.lessons,
                 s.duration_sec,
+                s.git_diff,
                 now,
             ),
         )
@@ -49,6 +50,22 @@ def log_session(s: SessionLog):
         return ApiResponse(ok=True, message="Session logged")
     except conn.IntegrityError:
         return ApiResponse(ok=False, message="Duplicate session_id")
+
+    # Phase 2: Extract skills from git diff
+    extracted_skills = []
+    if s.git_diff and len(s.git_diff) > 50:
+        try:
+            from .skill_extractor import extract_skills_from_diff
+            extracted_skills = extract_skills_from_diff(s.git_diff, s.changed_files)
+            if extracted_skills:
+                _save_extracted_skills(conn, extracted_skills, now)
+        except Exception as e:
+            import logging
+            logging.getLogger("evo.session").warning(f"Skill extraction from diff failed: {e}")
+
+    return ApiResponse(ok=True, message="Session logged", data={
+        "skills_extracted": len(extracted_skills),
+    })
 
 
 @router.get("/recent")
@@ -220,3 +237,52 @@ def flush_session(req: SessionFlushRequest):
 
     conn.commit()
     return ApiResponse(ok=True, data=stats)
+
+
+def _save_extracted_skills(conn, skills, now):
+    """Save skills extracted from git diff into skills table."""
+    for s in skills:
+        key = hashlib.sha256(
+            f"{s['name']}:{s['domain']}:{s['pattern'][:80]}".encode()
+        ).hexdigest()[:16]
+        try:
+            conn.execute(
+                """INSERT INTO skills (skill_key, name, domain, pattern, weight,
+                   use_count, success_count, created_at, last_used, source, code_example)
+                   VALUES (?, ?, ?, ?, ?, 0, 0, ?, 0, ?, ?)""",
+                (key, s["name"], s["domain"], s["pattern"],
+                 s.get("weight", 0.5), now, s.get("source", "git_diff"),
+                 s.get("code_example", "")),
+            )
+        except conn.IntegrityError:
+            # Update: merge code_example if we have one and existing doesn't
+            existing = conn.execute(
+                "SELECT code_example FROM skills WHERE skill_key=?", (key,)
+            ).fetchone()
+            new_example = s.get("code_example", "")
+            if new_example and (not existing or not existing["code_example"]):
+                conn.execute(
+                    "UPDATE skills SET code_example=?, weight=MAX(weight,?), last_used=? WHERE skill_key=?",
+                    (new_example, s.get("weight", 0.5), now, key),
+                )
+            else:
+                conn.execute(
+                    "UPDATE skills SET weight=MAX(weight,?), last_used=? WHERE skill_key=?",
+                    (s.get("weight", 0.5), now, key),
+                )
+    conn.commit()
+
+    # Sync embeddings for new skills
+    try:
+        from .vec_sync import sync_row_embedding
+        for s in skills:
+            key = hashlib.sha256(
+                f"{s['name']}:{s['domain']}:{s['pattern'][:80]}".encode()
+            ).hexdigest()[:16]
+            row = conn.execute("SELECT id FROM skills WHERE skill_key=?", (key,)).fetchone()
+            if row:
+                sync_row_embedding(conn, "skills", row["id"], {
+                    "name": s["name"], "domain": s["domain"], "pattern": s["pattern"],
+                })
+    except Exception:
+        pass

@@ -27,6 +27,7 @@ class SessionLog(BaseModel):
     changed_files: List[str] = []
     lessons: str = ""
     duration_sec: int = 0
+    git_diff: str = ""  # Phase 2: git diff for skill extraction
 
 
 # --- Skills ---

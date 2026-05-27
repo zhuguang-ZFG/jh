@@ -229,6 +229,8 @@ def format_context(all_data):
         lines.append("## Relevant Skills")
         for s in skills[:3]:
             lines.append(f"- **{s['name']}** [{s['domain']}]: {s.get('pattern', '')[:100]}")
+            if s.get("code_example"):
+                lines.append(f"  Example: {s['code_example'][:120]}")
 
     patterns = all_data.get("patterns", [])
     if patterns:
