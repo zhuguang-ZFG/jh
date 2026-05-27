@@ -11,6 +11,7 @@ from .api_memory import router as memory_router
 from .api_session import router as session_router
 from .api_skills import router as skills_router
 from .api_evo import router as evo_router
+from .api_lima import router as lima_router
 
 logger = logging.getLogger("evo")
 
@@ -48,6 +49,13 @@ def _start_scheduler():
             _run_daily_job, "cron", hour=3, minute=0,
             id="daily_maintenance",
         )
+
+        # LiMa sync: 05:00 UTC (13:00 CST), daily
+        if config.LIMA_SYNC_ENABLED:
+            _scheduler.add_job(
+                _run_lima_sync_job, "cron", hour=5, minute=0,
+                id="lima_sync",
+            )
 
         _scheduler.start()
         logger.info("APScheduler started (weekly_evolution + daily_maintenance)")
@@ -97,6 +105,43 @@ def _run_daily_job():
     logger.info(f"Daily maintenance: {result}")
 
 
+def _run_lima_sync_job():
+    """LiMa cross-server sync — fetches knowledge from LiMa, imports into evo-server."""
+    import asyncio
+    from .lima_bridge import run_lima_sync
+    from .telegram_bot import send_notification
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # Already in async context (APScheduler async), create task
+            loop.create_task(_async_lima_sync())
+        else:
+            loop.run_until_complete(_async_lima_sync())
+    except RuntimeError:
+        # No event loop, create one
+        asyncio.run(_async_lima_sync())
+
+
+async def _async_lima_sync():
+    from .lima_bridge import run_lima_sync
+    from .telegram_bot import send_notification
+
+    try:
+        result = await run_lima_sync()
+        msg = (
+            f"🔗 *LiMa Sync Complete*\n"
+            f"Stats imported: {result['stats']['imported']}\n"
+            f"Skills imported: {result['knowledge']['imported_skills']}\n"
+            f"Patterns imported: {result['knowledge']['imported_patterns']}\n"
+            f"Exported: {result['export']['skills']} skills, {result['export']['patterns']} patterns"
+        )
+        await send_notification(msg)
+    except Exception as e:
+        logger.error(f"LiMa sync failed: {e}")
+        await send_notification(f"❌ LiMa sync failed: {e}")
+
+
 app = FastAPI(title="Evo-Server", version="0.1.0", lifespan=lifespan)
 
 # --- API key middleware ---
@@ -119,6 +164,7 @@ app.include_router(memory_router)
 app.include_router(session_router)
 app.include_router(skills_router)
 app.include_router(evo_router)
+app.include_router(lima_router)
 
 
 # --- Health ---

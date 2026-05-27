@@ -262,6 +262,36 @@ async def handle_update(update: dict, db_conn):
                     ]]
                     await send_inline_keyboard(chat_id, text, buttons)
 
+    elif cmd == "/sync":
+        await send_message(chat_id, "🔗 Syncing with LiMa server...")
+        from .lima_bridge import run_lima_sync
+        try:
+            result = await run_lima_sync()
+            msg = (
+                f"🔗 *LiMa Sync Complete*\n"
+                f"Stats: {result['stats']['imported']} rules\n"
+                f"Skills: {result['knowledge']['imported_skills']}\n"
+                f"Patterns: {result['knowledge']['imported_patterns']}\n"
+                f"Exported: {result['export']['skills']} skills, {result['export']['patterns']} patterns"
+            )
+            await send_message(chat_id, msg)
+        except Exception as e:
+            await send_message(chat_id, f"❌ Sync failed: {e}")
+
+    elif cmd == "/lima":
+        from .lima_bridge import fetch_lima_stats
+        stats = await fetch_lima_stats()
+        mem = stats.get("memory", {})
+        outcome = stats.get("outcome", {})
+        msg = (
+            f"*LiMa Server Status*\n"
+            f"Memory: {mem.get('total', '?')} entries\n"
+            f"  Types: {', '.join(f'{k}({v})' for k, v in mem.get('by_type', {}).items())}\n"
+            f"Outcome: {outcome.get('total', '?')} entries\n"
+            f"  Success: {outcome.get('by_source', {}).get('telegram', {}).get('success', '?')}/{outcome.get('by_source', {}).get('telegram', {}).get('total', '?')}"
+        )
+        await send_message(chat_id, msg)
+
     elif cmd == "/approve" and arg:
         try:
             evo_id = int(arg)
@@ -335,6 +365,8 @@ async def handle_update(update: dict, db_conn):
             "/reject <id> — Reject evolution\n"
             "/digest — Weekly summary\n"
             "/run — Manually trigger evolution\n"
+            "/sync — Sync knowledge with LiMa server\n"
+            "/lima — LiMa server status\n"
             "/say <text> — Text to speech (v2.5)\n"
             "/voice [model] <text> — Voice with model choice",
         )
