@@ -93,6 +93,43 @@ CREATE TABLE IF NOT EXISTS quality_snapshots (
     created_at REAL NOT NULL
 );
 
+-- Failure patterns (lessons from mistakes)
+CREATE TABLE IF NOT EXISTS failure_patterns (
+    id INTEGER PRIMARY KEY,
+    pattern_key TEXT UNIQUE NOT NULL,
+    domain TEXT NOT NULL,
+    error_type TEXT NOT NULL,      -- syntax/import/logic/config/performance
+    description TEXT NOT NULL,
+    file_context TEXT DEFAULT '',  -- which file/area this applies to
+    fix_suggestion TEXT DEFAULT '',
+    occurrences INTEGER DEFAULT 1,
+    created_at REAL NOT NULL,
+    last_seen REAL NOT NULL
+);
+
+-- Code conventions (extracted from project codebase)
+CREATE TABLE IF NOT EXISTS conventions (
+    id INTEGER PRIMARY KEY,
+    convention_key TEXT UNIQUE NOT NULL,
+    category TEXT NOT NULL,        -- naming/error_handling/structure/style
+    rule TEXT NOT NULL,
+    example TEXT DEFAULT '',
+    confidence REAL DEFAULT 0.5,
+    created_at REAL NOT NULL
+);
+
+-- Git patterns (learned from commit history)
+CREATE TABLE IF NOT EXISTS git_patterns (
+    id INTEGER PRIMARY KEY,
+    pattern_key TEXT UNIQUE NOT NULL,
+    pattern_type TEXT NOT NULL,    -- commit_style/code_pattern/refactor
+    description TEXT NOT NULL,
+    example TEXT DEFAULT '',
+    repo TEXT DEFAULT '',
+    confidence REAL DEFAULT 0.5,
+    created_at REAL NOT NULL
+);
+
 -- FTS index for skills + patterns
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     name, domain, pattern, description,
@@ -110,6 +147,10 @@ CREATE INDEX IF NOT EXISTS idx_evolutions_status ON evolutions(status);
 CREATE INDEX IF NOT EXISTS idx_events_source ON events(source);
 CREATE INDEX IF NOT EXISTS idx_events_recorded ON events(recorded_at DESC);
 CREATE INDEX IF NOT EXISTS idx_quality_session ON quality_snapshots(session_id);
+CREATE INDEX IF NOT EXISTS idx_failure_domain ON failure_patterns(domain);
+CREATE INDEX IF NOT EXISTS idx_failure_type ON failure_patterns(error_type);
+CREATE INDEX IF NOT EXISTS idx_conventions_category ON conventions(category);
+CREATE INDEX IF NOT EXISTS idx_git_patterns_type ON git_patterns(pattern_type);
 """
 
 

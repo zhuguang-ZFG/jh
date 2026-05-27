@@ -15,6 +15,7 @@ from .api_patterns import router as patterns_router
 from .api_lima import router as lima_router
 from .api_quality import router as quality_router
 from .api_context import router as context_router
+from .api_failures import router as learn_router
 
 logger = logging.getLogger("evo")
 
@@ -171,6 +172,7 @@ app.include_router(patterns_router)
 app.include_router(lima_router)
 app.include_router(quality_router)
 app.include_router(context_router)
+app.include_router(learn_router)
 
 
 # --- Health ---
