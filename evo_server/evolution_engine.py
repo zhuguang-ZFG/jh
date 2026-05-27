@@ -499,3 +499,121 @@ async def run_weekly_quality_report() -> dict:
     result = _run()
     logger.info(f"Quality report: {result}")
     return result
+
+
+# ── LLM Skill Refinement ─────────────────────────────────────
+
+async def run_llm_skill_refinement() -> dict:
+    """Use LLM to review, deduplicate, and improve skill descriptions.
+
+    Runs daily. Processes skills in batches of 20 to avoid LLM context limits.
+    """
+    from .llm_bridge import chat
+    from .db import get_conn
+
+    conn = get_conn()
+    skills = conn.execute(
+        "SELECT id, name, domain, pattern, weight, use_count FROM skills ORDER BY id"
+    ).fetchall()
+
+    if len(skills) < 5:
+        logger.info("Skill refinement: not enough skills (%d), skipping", len(skills))
+        return {"status": "skipped", "reason": "not_enough_skills", "count": len(skills)}
+
+    kept = 0
+    merged = 0
+    deleted = 0
+    rewritten = 0
+
+    # Process in batches of 20
+    batch_size = 20
+    for i in range(0, len(skills), batch_size):
+        batch = skills[i:i+batch_size]
+        skill_lines = []
+        for s in batch:
+            skill_lines.append(
+                f"{s['id']}: {s['name']}[{s['domain']}] "
+                f"w={s['weight']:.1f} use={s['use_count']} "
+                f"{s['pattern'][:80]}"
+            )
+
+        prompt = (
+            f"Review these {len(batch)} skills. Decide for each: keep, merge, delete, or rewrite.\n"
+            f"Rules: don't delete skills with use>3. Prefer merge over delete.\n"
+            f"Return JSON array only:\n"
+            f'[{{"action":"keep","id":1}},{{"action":"delete","id":2,"reason":"noise"}}]\n\n'
+            f"Skills:\n" + "\n".join(skill_lines)
+        )
+
+        try:
+            response = await chat(
+                prompt,
+                system="Return ONLY a JSON array. No explanation.",
+            )
+        except Exception as e:
+            logger.warning("Skill refinement batch %d LLM error: %s", i, e)
+            continue
+
+        if not response:
+            continue
+
+        # Parse response
+        import re as _re
+        match = _re.search(r"\[.*\]", response, _re.DOTALL)
+        if not match:
+            logger.warning("Skill refinement batch %d: no JSON", i)
+            continue
+
+        try:
+            actions = json.loads(match.group())
+        except json.JSONDecodeError:
+            continue
+
+        for act in actions:
+            action = act.get("action", "")
+            if action == "keep":
+                kept += 1
+            elif action == "delete":
+                sid = act.get("id")
+                if sid and sid > 0:
+                    row = conn.execute("SELECT use_count FROM skills WHERE id=?", (sid,)).fetchone()
+                    if row and row["use_count"] > 3:
+                        continue
+                    conn.execute("DELETE FROM skills WHERE id=?", (sid,))
+                    deleted += 1
+            elif action == "merge":
+                from_id = act.get("from_id")
+                to_id = act.get("to_id")
+                if from_id and to_id and from_id != to_id:
+                    target = conn.execute("SELECT pattern FROM skills WHERE id=?", (to_id,)).fetchone()
+                    source = conn.execute("SELECT pattern FROM skills WHERE id=?", (from_id,)).fetchone()
+                    if target and source:
+                        merged_pattern = target["pattern"] + " | " + source["pattern"][:80]
+                        conn.execute(
+                            "UPDATE skills SET pattern=?, weight=MIN(weight+0.1, 1.5) WHERE id=?",
+                            (merged_pattern[:300], to_id),
+                        )
+                        conn.execute("DELETE FROM skills WHERE id=?", (from_id,))
+                        merged += 1
+            elif action == "rewrite":
+                sid = act.get("id")
+                new_pattern = act.get("new_pattern", "")
+                if sid and new_pattern:
+                    conn.execute(
+                        "UPDATE skills SET pattern=?, weight=MIN(weight+0.05, 1.5) WHERE id=?",
+                        (new_pattern[:300], sid),
+                    )
+                    rewritten += 1
+
+    conn.commit()
+
+    result = {
+        "status": "done",
+        "total_skills": len(skills),
+        "kept": kept,
+        "merged": merged,
+        "deleted": deleted,
+        "rewritten": rewritten,
+    }
+    logger.info("Skill refinement: %s", result)
+    return result

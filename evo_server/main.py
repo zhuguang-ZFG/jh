@@ -91,8 +91,15 @@ def _start_scheduler():
             id="weekly_quality_report",
         )
 
+        # LLM skill refinement: 06:00 UTC (14:00 CST), daily
+        if config.LLM_SYNC_ENABLED:
+            _scheduler.add_job(
+                _run_skill_refinement_job, "cron", hour=6, minute=0,
+                id="llm_skill_refinement",
+            )
+
         _scheduler.start()
-        logger.info("APScheduler started (weekly_evolution + daily_maintenance + quality_report)")
+        logger.info("APScheduler started (weekly_evolution + daily_maintenance + quality_report + skill_refinement)")
     except ImportError:
         logger.warning("APScheduler not installed, cron jobs disabled")
     except Exception as e:
@@ -243,6 +250,41 @@ async def _async_quality_report():
             await send_notification(msg)
     except Exception as e:
         logger.error(f"Quality report failed: {e}")
+
+
+def _run_skill_refinement_job():
+    """Daily LLM skill refinement — deduplicate, improve, prune skills."""
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(_async_skill_refinement())
+        else:
+            loop.run_until_complete(_async_skill_refinement())
+    except RuntimeError:
+        asyncio.run(_async_skill_refinement())
+
+
+async def _async_skill_refinement():
+    from .evolution_engine import run_llm_skill_refinement
+    from .telegram_bot import send_notification
+    try:
+        result = await run_llm_skill_refinement()
+        status = result.get("status", "unknown")
+        if status == "done":
+            msg = (
+                f"🔧 *Skill Refinement*\n"
+                f"Total: {result['total_skills']} skills\n"
+                f"Kept: {result['kept']}, Merged: {result['merged']}, "
+                f"Deleted: {result['deleted']}, Rewritten: {result['rewritten']}"
+            )
+            await send_notification(msg)
+        elif status == "skipped":
+            logger.info("Skill refinement skipped: %s", result.get("reason"))
+        else:
+            logger.warning("Skill refinement: %s", status)
+    except Exception as e:
+        logger.error(f"Skill refinement failed: {e}")
 
 
 app = FastAPI(title="Evo-Server", version="0.1.0", lifespan=lifespan)
