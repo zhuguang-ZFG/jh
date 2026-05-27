@@ -36,14 +36,26 @@ def api(method, path, data=None):
 
 
 def parse_transcript(transcript_path):
-    """Parse Claude Code JSONL transcript to extract session intelligence."""
+    """Parse Claude Code JSONL transcript to extract session intelligence.
+
+    Digs into tool call `input` fields to extract real knowledge:
+    - Bash commands: deployment patterns, test commands, git workflows
+    - Edit calls: what files changed and what kind of changes
+    - Write calls: what new modules/files were created
+    - Read calls: what files were examined (domain context)
+    """
     if not transcript_path or not os.path.isfile(transcript_path):
         return None
 
     result = {
         "tool_counts": {},
         "files_edited": [],
+        "files_written": [],
         "bash_commands": [],
+        "bash_patterns": [],      # normalized command roots with context
+        "edit_details": [],       # (file, old_preview, new_preview)
+        "write_details": [],      # (file, content_preview)
+        "read_files": [],         # files that were read
         "errors_encountered": [],
         "user_messages": [],
         "total_tool_calls": 0,
@@ -83,22 +95,53 @@ def parse_transcript(transcript_path):
                         result["tool_counts"][name] = result["tool_counts"].get(name, 0) + 1
                         result["total_tool_calls"] += 1
 
-                        # File edits
-                        if name in ("Write", "Edit"):
-                            fp = inp.get("file_path", "")
-                            if fp:
-                                result["files_edited"].append(fp)
-
-                        # Bash commands — extract what was actually run
+                        # ── Bash: extract command + normalize root ──
                         if name == "Bash":
                             cmd = inp.get("command", "")
                             if cmd and len(cmd) > 3:
-                                # Strip long args, keep first 120 chars
-                                result["bash_commands"].append(cmd[:120])
+                                result["bash_commands"].append(cmd[:200])
+                                # Extract root command and meaningful subcommands
+                                root = cmd.split()[0] if cmd.split() else ""
+                                # Skip noise commands
+                                if root not in ("cd", "echo", "ls", "cat", "pwd", "mkdir", ""):
+                                    result["bash_patterns"].append({
+                                        "root": root,
+                                        "full": cmd[:150],
+                                    })
 
-                        # Errors from tool results
-                        if name == "Read" and "error" in str(inp).lower():
-                            result["errors_encountered"].append(str(inp)[:100])
+                        # ── Write: extract new file content preview ──
+                        elif name == "Write":
+                            fp = inp.get("file_path", "")
+                            if fp:
+                                result["files_edited"].append(fp)
+                                result["files_written"].append(fp)
+                                content_preview = inp.get("content", "")[:300]
+                                result["write_details"].append({
+                                    "file": fp,
+                                    "preview": content_preview,
+                                })
+
+                        # ── Edit: extract what changed ──
+                        elif name == "Edit":
+                            fp = inp.get("file_path", "")
+                            if fp:
+                                result["files_edited"].append(fp)
+                                old_str = inp.get("old_string", "")[:150]
+                                new_str = inp.get("new_string", "")[:150]
+                                result["edit_details"].append({
+                                    "file": fp,
+                                    "old": old_str,
+                                    "new": new_str,
+                                })
+
+                        # ── Read: track examined files ──
+                        elif name == "Read":
+                            fp = inp.get("file_path", "")
+                            if fp:
+                                result["read_files"].append(fp)
+                            # Errors from read attempts
+                            if "error" in str(inp).lower():
+                                result["errors_encountered"].append(str(inp)[:100])
 
     except (IOError, OSError):
         return None
@@ -128,108 +171,185 @@ def infer_domain(changed_files):
 
 
 def extract_skills(transcript_data, changed_files, outcome):
-    """Extract meaningful skills from parsed transcript data."""
+    """Extract meaningful skills from parsed transcript data.
+
+    Produces REAL knowledge from tool input fields:
+    - Deployment patterns from Bash commands
+    - What new modules were created (from Write content)
+    - What changes were made (from Edit old/new)
+    - Framework-specific patterns
+    - File organization patterns
+    """
     skills = []
     if not transcript_data:
         return skills
 
     domain = infer_domain(changed_files)
     tool_counts = transcript_data.get("tool_counts", {})
-    bash_cmds = transcript_data.get("bash_commands", [])
+    bash_patterns = transcript_data.get("bash_patterns", [])
     files_edited = transcript_data.get("files_edited", [])
+    files_written = transcript_data.get("files_written", [])
+    edit_details = transcript_data.get("edit_details", [])
+    write_details = transcript_data.get("write_details", [])
     user_msgs = transcript_data.get("user_messages", [])
-    total = transcript_data.get("total_tool_calls", 0)
 
-    # 1. High-level session summary skill (always create)
-    file_count = len(set(files_edited))
-    bash_count = len(bash_cmds)
-    edit_count = tool_counts.get("Edit", 0) + tool_counts.get("Write", 0)
-
-    if file_count > 0:
-        # Extract what files were worked on
-        basenames = list(set(
-            os.path.basename(f) for f in files_edited
-        ))[:5]
+    # ── 1. Deployment / DevOps patterns from Bash ──
+    deploy_keywords = {
+        "scp": "file transfer",
+        "ssh": "remote execution",
+        "systemctl": "service management",
+        "docker": "containerization",
+        "nginx": "web server config",
+        "git push": "code push",
+        "git commit": "version control",
+        "pip install": "python dependency",
+        "npm install": "js dependency",
+        "pytest": "python testing",
+        "jest": "js testing",
+        "curl": "api testing",
+        "python -m uvicorn": "server startup",
+        "python -m fastapi": "fastapi usage",
+    }
+    found_deploy = {}
+    for bp in bash_patterns:
+        full = bp["full"].lower()
+        for kw, label in deploy_keywords.items():
+            if kw in full:
+                if label not in found_deploy:
+                    found_deploy[label] = bp["full"]
+    for label, example in list(found_deploy.items())[:3]:
         skills.append({
-            "name": f"session_{domain}_{file_count}files",
+            "name": f"deploy_{label.replace(' ', '_')[:30]}",
             "domain": domain,
-            "pattern": f"Worked on {file_count} files ({', '.join(basenames)}): {edit_count} edits, {bash_count} commands",
-            "weight": 1.0 if outcome == "success" else 0.5,
+            "pattern": f"Deployment: {label} -- used: {example[:120]}",
+            "weight": 0.9,
         })
 
-    # 2. Tool usage patterns — what tools were heavily used
-    for tool, count in tool_counts.items():
-        if count >= 5 and tool not in ("Read", "TaskUpdate", "TaskCreate"):
+    # ── 2. New modules created (from Write content) ──
+    for wd in write_details[:3]:
+        fp = wd["file"]
+        preview = wd["preview"]
+        basename = os.path.basename(fp)
+        # Detect what was created
+        if "class " in preview:
+            cls_match = re.search(r"class\s+(\w+)", preview)
+            cls_name = cls_match.group(1) if cls_match else basename
             skills.append({
-                "name": f"tool_pattern_{tool.lower()}",
+                "name": f"created_class_{cls_name[:25]}",
                 "domain": domain,
-                "pattern": f"Used {tool} {count} times in session",
+                "pattern": f"Created class {cls_name} in {basename}",
+                "weight": 1.0,
+            })
+        elif "def " in preview:
+            func_match = re.search(r"def\s+(\w+)", preview)
+            func_name = func_match.group(1) if func_match else basename
+            skills.append({
+                "name": f"created_func_{func_name[:25]}",
+                "domain": domain,
+                "pattern": f"Created function {func_name} in {basename}",
+                "weight": 0.9,
+            })
+        elif "router" in preview.lower() or "app." in preview.lower():
+            skills.append({
+                "name": f"created_router_{basename[:25]}",
+                "domain": domain,
+                "pattern": f"Created API router in {basename}",
+                "weight": 0.9,
+            })
+        elif "import" in preview:
+            skills.append({
+                "name": f"created_module_{basename[:25]}",
+                "domain": domain,
+                "pattern": f"Created new module {basename}",
                 "weight": 0.8,
             })
 
-    # 3. Bash command patterns — extract repeated commands
-    if bash_cmds:
-        # Normalize commands (strip args)
-        cmd_roots = []
-        for cmd in bash_cmds:
-            # Get first word (the actual command)
-            root = cmd.split()[0] if cmd.split() else ""
-            # Skip common noise
-            if root in ("cd", "echo", "ls", "cat", "pwd", ""):
-                continue
-            cmd_roots.append(root)
+    # ── 3. Edit patterns — what kind of changes were made ──
+    edit_categories = Counter()
+    edit_examples = {}
+    for ed in edit_details[:20]:
+        new_text = ed["new"]
+        old_text = ed["old"]
+        basename = os.path.basename(ed["file"])
 
-        cmd_counts = Counter(cmd_roots)
-        for cmd, count in cmd_counts.most_common(3):
-            if count >= 2:
-                skills.append({
-                    "name": f"bash_pattern_{cmd.replace('/', '_').replace('-', '_')[:30]}",
-                    "domain": domain,
-                    "pattern": f"Repeated command: {cmd} ({count}x)",
-                    "weight": 0.7,
-                })
+        if "import" in new_text and "import" not in old_text:
+            edit_categories["added_import"] += 1
+            edit_examples["added_import"] = f"Added import in {basename}"
+        elif "def " in new_text and "def " not in old_text:
+            edit_categories["added_function"] += 1
+            edit_examples["added_function"] = f"Added function in {basename}"
+        elif "class " in new_text and "class " not in old_text:
+            edit_categories["added_class"] += 1
+            edit_examples["added_class"] = f"Added class in {basename}"
+        elif "Body(" in new_text:
+            edit_categories["fixed_body_annotation"] += 1
+            edit_examples["fixed_body_annotation"] = f"Fixed Body() annotation in {basename}"
+        elif "@router" in new_text:
+            edit_categories["added_route"] += 1
+            edit_examples["added_route"] = f"Added route in {basename}"
+        elif "return" in new_text and "return" not in old_text:
+            edit_categories["added_return"] += 1
+            edit_examples["added_return"] = f"Added return statement in {basename}"
 
-    # 4. Framework/library detection from bash commands
+    for cat, count in edit_categories.most_common(3):
+        if count >= 2:
+            skills.append({
+                "name": f"edit_pattern_{cat[:30]}",
+                "domain": domain,
+                "pattern": f"Repeated edit pattern: {cat} ({count}x) -- {edit_examples.get(cat, '')}",
+                "weight": 0.8,
+            })
+
+    # ── 4. Bash command clusters (not just roots, but meaningful combos) ──
+    cmd_roots = [bp["root"] for bp in bash_patterns]
+    cmd_counts = Counter(cmd_roots)
+    for cmd, count in cmd_counts.most_common(3):
+        if count >= 2 and cmd not in ("cd", "echo", "ls", "cat", "pwd", "mkdir"):
+            # Get a sample full command for context
+            sample = next((bp["full"] for bp in bash_patterns if bp["root"] == cmd), cmd)
+            skills.append({
+                "name": f"bash_{cmd.replace('/', '_').replace('-', '_')[:30]}",
+                "domain": domain,
+                "pattern": f"Repeated: {cmd} ({count}x) -- e.g. {sample[:100]}",
+                "weight": 0.7,
+            })
+
+    # ── 5. Framework detection from all sources ──
     frameworks = set()
-    for cmd in bash_cmds:
-        cmd_lower = cmd.lower()
-        for fw in ("fastapi", "flask", "django", "react", "vue", "express",
-                    "gin", "axum", "actix", "uvicorn", "pytest", "jest"):
-            if fw in cmd_lower:
-                frameworks.add(fw)
-        # pip/npm install detection
-        if "pip install" in cmd_lower:
-            pkgs = re.findall(r"pip install\s+(\S+)", cmd_lower)
-            frameworks.update(pkgs[:3])
-        if "npm install" in cmd_lower or "npm i " in cmd_lower:
-            frameworks.add("npm")
+    all_text = " ".join([
+        bp["full"] for bp in bash_patterns
+    ] + [wd.get("preview", "") for wd in write_details]).lower()
+
+    for fw in ("fastapi", "flask", "django", "react", "vue", "express",
+                "gin", "axum", "actix", "uvicorn", "pytest", "jest",
+                "apscheduler", "httpx", "pydantic", "sqlalchemy"):
+        if fw in all_text:
+            frameworks.add(fw)
 
     for fw in list(frameworks)[:3]:
         skills.append({
             "name": f"framework_{fw}",
             "domain": domain,
-            "pattern": f"Used {fw} in this session",
+            "pattern": f"Framework used: {fw}",
             "weight": 0.9,
         })
 
-    # 5. File clustering — which files are often edited together
-    if len(files_edited) >= 3:
-        # Group by directory
-        dirs = Counter()
-        for f in files_edited:
-            d = os.path.dirname(f).replace("\\", "/").split("/")[-1]
-            if d:
-                dirs[d] += 1
-        for d, count in dirs.most_common(2):
-            if count >= 2:
-                skills.append({
-                    "name": f"cluster_{d.replace('-', '_').replace('.', '_')[:30]}",
-                    "domain": domain,
-                    "pattern": f"Active cluster: {d}/ ({count} edits)",
-                    "weight": 0.6,
-                })
+    # ── 6. Session summary (always create) ──
+    file_count = len(set(files_edited))
+    write_count = len(files_written)
+    edit_count = len(edit_details)
+    bash_count = len(bash_patterns)
 
-    # 6. Error recovery patterns
+    if file_count > 0:
+        basenames = list(set(os.path.basename(f) for f in files_edited))[:5]
+        skills.append({
+            "name": f"session_{domain}_{file_count}files",
+            "domain": domain,
+            "pattern": f"Session: {file_count} files ({', '.join(basenames)}), {write_count} new, {edit_count} edits, {bash_count} commands",
+            "weight": 1.0 if outcome == "success" else 0.5,
+        })
+
+    # ── 7. Error recovery ──
     if outcome == "success" and transcript_data.get("errors_encountered"):
         skills.append({
             "name": f"error_recovery_{domain}",
@@ -247,7 +367,7 @@ def extract_skills(transcript_data, changed_files, outcome):
             seen.add(key)
             unique.append(s)
 
-    return unique[:8]  # Max 8 skills per session
+    return unique[:10]  # Max 10 skills per session (was 8)
 
 
 def main():
@@ -281,7 +401,12 @@ def main():
         transcript_data = {
             "tool_counts": {},
             "files_edited": changed_files,
+            "files_written": [],
             "bash_commands": [],
+            "bash_patterns": [],
+            "edit_details": [],
+            "write_details": [],
+            "read_files": [],
             "errors_encountered": [],
             "user_messages": [relevant_output[:200]],
             "total_tool_calls": 0,
@@ -311,10 +436,19 @@ def main():
     # Build lessons from transcript summary
     lessons_parts = []
     if transcript_data:
-        tc = transcript_data.get("tool_counts", {})
         fe = len(set(transcript_data.get("files_edited", [])))
-        bc = len(transcript_data.get("bash_commands", []))
-        lessons_parts.append(f"{fe} files, {bc} commands, {transcript_data.get('total_tool_calls', 0)} tool calls")
+        fw = len(transcript_data.get("files_written", []))
+        bc = len(transcript_data.get("bash_patterns", []))
+        ed = len(transcript_data.get("edit_details", []))
+        lessons_parts.append(f"{fe} files touched, {fw} new, {ed} edits, {bc} commands")
+        # Mention frameworks if detected
+        frameworks = set()
+        for bp in transcript_data.get("bash_patterns", []):
+            for fw_name in ("fastapi", "pytest", "uvicorn", "docker", "nginx"):
+                if fw_name in bp.get("full", "").lower():
+                    frameworks.add(fw_name)
+        if frameworks:
+            lessons_parts.append(f"Frameworks: {', '.join(sorted(frameworks))}")
     if changed_files:
         basenames = [os.path.basename(f) for f in changed_files[:5]]
         lessons_parts.append(f"Modified: {', '.join(basenames)}")
