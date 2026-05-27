@@ -19,7 +19,7 @@ VEC_TABLES = {
     },
     "failure_patterns": {
         "vec_table": "failures_vec",
-        "text_fields": ["error_type", "description", "fix_suggestion", "domain"],
+        "text_fields": ["error_type", "description", "fix_suggestion", "fix_code", "domain"],
     },
     "memories": {
         "vec_table": "memories_vec",
@@ -153,7 +153,7 @@ def _search_columns(table: str) -> List[str]:
     return {
         "skills": ["name", "domain", "pattern"],
         "patterns": ["name", "domain", "description"],
-        "failure_patterns": ["error_type", "description", "fix_suggestion"],
+        "failure_patterns": ["error_type", "description", "fix_suggestion", "fix_code"],
         "memories": ["content", "domain", "category"],
     }.get(table, ["name", "description"])
 

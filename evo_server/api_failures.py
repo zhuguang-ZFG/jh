@@ -2,7 +2,7 @@
 import hashlib
 import time
 from typing import Optional
-from fastapi import APIRouter, Body
+from fastapi import APIRouter, Body, BackgroundTasks
 from .db import get_conn
 from .models import ApiResponse
 from .vec_search import vec_search
@@ -10,12 +10,12 @@ from .vec_search import vec_search
 router = APIRouter(prefix="/learn", tags=["learning"])
 
 
-def _sync_failure_embedding(conn, row_id, error_type, description, fix_suggestion, domain):
+def _sync_failure_embedding(conn, row_id, error_type, description, fix_suggestion, domain, fix_code=""):
     try:
         from .vec_sync import sync_row_embedding
         sync_row_embedding(conn, "failure_patterns", row_id, {
             "error_type": error_type, "description": description,
-            "fix_suggestion": fix_suggestion, "domain": domain,
+            "fix_suggestion": fix_suggestion, "fix_code": fix_code, "domain": domain,
         })
     except Exception:
         pass
@@ -25,6 +25,7 @@ def _sync_failure_embedding(conn, row_id, error_type, description, fix_suggestio
 
 @router.post("/failure")
 def record_failure(
+    background_tasks: BackgroundTasks,
     domain: str = Body(...),
     error_type: str = Body(...),
     description: str = Body(...),
@@ -54,7 +55,62 @@ def record_failure(
         row_id = conn.execute("SELECT id FROM failure_patterns WHERE pattern_key=?", (key,)).fetchone()["id"]
         _sync_failure_embedding(conn, row_id, error_type, description, fix_suggestion, domain)
     conn.commit()
+
+    # Async: generate concrete fix code if not already present
+    existing = conn.execute(
+        "SELECT fix_code FROM failure_patterns WHERE pattern_key=?", (key,)
+    ).fetchone()
+    if existing and not existing["fix_code"]:
+        background_tasks.add_task(
+            _generate_and_store_fix, key, error_type, description, file_context, domain
+        )
+
     return ApiResponse(ok=True, data={"pattern_key": key})
+
+
+async def _generate_and_store_fix(pattern_key, error_type, description, file_context, domain):
+    """Background task: generate fix code and store it."""
+    import logging
+    logger = logging.getLogger("evo.fix_generator")
+    try:
+        from .fix_generator import generate_fix
+        fix_code, fix_type = await generate_fix(error_type, description, file_context, domain)
+        if fix_code:
+            conn = get_conn()
+            conn.execute(
+                "UPDATE failure_patterns SET fix_code=?, fix_type=? WHERE pattern_key=?",
+                (fix_code, fix_type, pattern_key),
+            )
+            conn.commit()
+            logger.info(f"Auto-generated fix for {pattern_key}: type={fix_type}")
+    except Exception as e:
+        logger.warning(f"Fix generation failed for {pattern_key}: {e}")
+
+
+@router.post("/failures/{pattern_key}/regenerate-fix")
+async def regenerate_fix(pattern_key: str):
+    """Manually trigger fix regeneration for a failure pattern."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM failure_patterns WHERE pattern_key=?", (pattern_key,)
+    ).fetchone()
+    if not row:
+        return ApiResponse(ok=False, error="Pattern not found")
+
+    from .fix_generator import generate_fix
+    fix_code, fix_type = await generate_fix(
+        row["error_type"], row["description"], row["file_context"], row["domain"]
+    )
+    if fix_code:
+        conn.execute(
+            "UPDATE failure_patterns SET fix_code=?, fix_type=? WHERE pattern_key=?",
+            (fix_code, fix_type, pattern_key),
+        )
+        conn.commit()
+        return ApiResponse(ok=True, data={
+            "pattern_key": pattern_key, "fix_code": fix_code, "fix_type": fix_type
+        })
+    return ApiResponse(ok=False, error="Fix generation failed")
 
 
 @router.get("/failures")

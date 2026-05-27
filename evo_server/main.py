@@ -98,6 +98,12 @@ def _start_scheduler():
                 id="llm_skill_refinement",
             )
 
+        # Retroactive fix generation: 07:00 UTC (15:00 CST), daily
+        _scheduler.add_job(
+            _run_fix_generation_job, "cron", hour=7, minute=0,
+            id="retroactive_fix_generation",
+        )
+
         _scheduler.start()
         logger.info("APScheduler started (weekly_evolution + daily_maintenance + quality_report + skill_refinement)")
     except ImportError:
@@ -285,6 +291,56 @@ async def _async_skill_refinement():
             logger.warning("Skill refinement: %s", status)
     except Exception as e:
         logger.error(f"Skill refinement failed: {e}")
+
+
+def _run_fix_generation_job():
+    """Retroactive fix generation — generate fix_code for failures missing it."""
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(_async_fix_generation())
+        else:
+            loop.run_until_complete(_async_fix_generation())
+    except RuntimeError:
+        asyncio.run(_async_fix_generation())
+
+
+async def _async_fix_generation():
+    from .fix_generator import generate_fix
+    from .db import get_conn
+
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT pattern_key, error_type, description, file_context, domain
+           FROM failure_patterns
+           WHERE (fix_code IS NULL OR fix_code = '') AND occurrences >= 2
+           ORDER BY occurrences DESC, last_seen DESC
+           LIMIT 10"""
+    ).fetchall()
+
+    if not rows:
+        logger.info("Fix generation: no failures needing fixes")
+        return
+
+    generated = 0
+    for row in rows:
+        try:
+            fix_code, fix_type = await generate_fix(
+                row["error_type"], row["description"],
+                row["file_context"], row["domain"]
+            )
+            if fix_code:
+                conn.execute(
+                    "UPDATE failure_patterns SET fix_code=?, fix_type=? WHERE pattern_key=?",
+                    (fix_code, fix_type, row["pattern_key"]),
+                )
+                generated += 1
+        except Exception as e:
+            logger.warning(f"Fix gen failed for {row['pattern_key']}: {e}")
+
+    conn.commit()
+    logger.info(f"Fix generation: {generated}/{len(rows)} succeeded")
 
 
 app = FastAPI(title="Evo-Server", version="0.1.0", lifespan=lifespan)

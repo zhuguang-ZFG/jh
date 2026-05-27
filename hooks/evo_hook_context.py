@@ -200,8 +200,12 @@ def format_context(all_data):
         lines.append("## [!] Avoid These Mistakes")
         for f in failures[:3]:
             lines.append(f"- **{f['error_type']}**: {f['description'][:120]}")
-            if f.get("fix_suggestion"):
-                lines.append(f"  Fix: {f['fix_suggestion'][:100]}")
+            # Prefer concrete fix_code over generic fix_suggestion
+            fix = f.get("fix_code") or f.get("fix_suggestion", "")
+            if fix:
+                fix_type = f.get("fix_type", "")
+                label = f"Fix ({fix_type})" if fix_type else "Fix"
+                lines.append(f"  {label}: {fix[:120]}")
 
     # 2. Code conventions (follow project style)
     conventions = all_data.get("conventions", [])

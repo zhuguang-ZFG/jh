@@ -242,11 +242,16 @@ def get_conn() -> sqlite3.Connection:
         _conn.row_factory = sqlite3.Row
         _conn.create_function("exp", 1, math.exp)  # needed for EMA calculations
         _conn.executescript(SCHEMA_SQL)
-        # ALTER TABLE: add fix_suggestion if missing (SQLite no IF NOT EXISTS for ADD COLUMN)
-        try:
-            _conn.execute("ALTER TABLE failure_patterns ADD COLUMN fix_suggestion TEXT DEFAULT ''")
-        except Exception:
-            pass  # column already exists
+        # ALTER TABLE: add columns if missing (SQLite no IF NOT EXISTS for ADD COLUMN)
+        for col, typedef in [
+            ("fix_suggestion", "TEXT DEFAULT ''"),
+            ("fix_code", "TEXT DEFAULT ''"),
+            ("fix_type", "TEXT DEFAULT ''"),
+        ]:
+            try:
+                _conn.execute(f"ALTER TABLE failure_patterns ADD COLUMN {col} {typedef}")
+            except Exception:
+                pass  # column already exists
 
         # Load sqlite-vec extension + create vec tables
         _init_vec_tables(_conn)
