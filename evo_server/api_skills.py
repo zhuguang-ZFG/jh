@@ -1,11 +1,39 @@
 """Skills management with EMA weight updates."""
 import time
-from fastapi import APIRouter
+from fastapi import APIRouter, Body
 from .db import get_conn
 from .models import SkillRecall, SkillUpdate, ApiResponse
 from . import config
 
 router = APIRouter(prefix="/skills", tags=["skills"])
+
+
+@router.post("/")
+def create_skill(
+    name: str = Body(...),
+    domain: str = Body("general"),
+    pattern: str = Body(""),
+    weight: float = Body(1.0),
+    source: str = Body("manual"),
+):
+    """Create or update a skill."""
+    import hashlib
+    conn = get_conn()
+    now = time.time()
+    key = hashlib.sha256(f"{name}:{domain}:{pattern[:80]}".encode()).hexdigest()[:16]
+    try:
+        conn.execute(
+            """INSERT INTO skills (skill_key, name, domain, pattern, weight, use_count, success_count, created_at, last_used, source)
+               VALUES (?, ?, ?, ?, ?, 0, 0, ?, 0, ?)""",
+            (key, name, domain, pattern, weight, now, source),
+        )
+    except conn.IntegrityError:
+        conn.execute(
+            "UPDATE skills SET pattern=?, weight=MAX(weight,?), last_used=? WHERE skill_key=?",
+            (pattern, weight, now, key),
+        )
+    conn.commit()
+    return ApiResponse(ok=True, data={"skill_key": key})
 
 
 @router.get("/")
