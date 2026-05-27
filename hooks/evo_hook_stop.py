@@ -2,7 +2,8 @@
 """Claude Code Stop hook — log session to evo-server when agent finishes.
 
 Reads JSON from stdin: {session_id, transcript_path, relevant_output, ...}
-Logs to evo-server /session/log endpoint and extracts skills.
+Parses transcript JSONL to extract: tool usage, file edits, bash commands,
+errors, and generates real skills.
 """
 import sys
 import json
@@ -11,6 +12,7 @@ import re
 import urllib.request
 import tempfile
 from datetime import datetime
+from collections import Counter
 
 SERVER = os.getenv("EVO_SERVER", "http://119.45.204.198")
 API_KEY = os.getenv("EVO_API_KEY", "")
@@ -31,6 +33,77 @@ def api(method, path, data=None):
             return json.loads(resp.read())
     except Exception:
         return {"ok": False}
+
+
+def parse_transcript(transcript_path):
+    """Parse Claude Code JSONL transcript to extract session intelligence."""
+    if not transcript_path or not os.path.isfile(transcript_path):
+        return None
+
+    result = {
+        "tool_counts": {},
+        "files_edited": [],
+        "bash_commands": [],
+        "errors_encountered": [],
+        "user_messages": [],
+        "total_tool_calls": 0,
+    }
+
+    try:
+        with open(transcript_path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                msg_type = d.get("type", "")
+
+                # User messages — extract intent
+                if msg_type == "user":
+                    msg = d.get("message", {})
+                    content = msg.get("content", "")
+                    if isinstance(content, str) and len(content) > 5:
+                        result["user_messages"].append(content[:200])
+
+                # Assistant messages — extract tool calls
+                if msg_type == "assistant":
+                    msg = d.get("message", {})
+                    content = msg.get("content", [])
+                    if not isinstance(content, list):
+                        continue
+                    for block in content:
+                        if not isinstance(block, dict):
+                            continue
+                        if block.get("type") != "tool_use":
+                            continue
+
+                        name = block.get("name", "")
+                        inp = block.get("input", {})
+                        result["tool_counts"][name] = result["tool_counts"].get(name, 0) + 1
+                        result["total_tool_calls"] += 1
+
+                        # File edits
+                        if name in ("Write", "Edit"):
+                            fp = inp.get("file_path", "")
+                            if fp:
+                                result["files_edited"].append(fp)
+
+                        # Bash commands — extract what was actually run
+                        if name == "Bash":
+                            cmd = inp.get("command", "")
+                            if cmd and len(cmd) > 3:
+                                # Strip long args, keep first 120 chars
+                                result["bash_commands"].append(cmd[:120])
+
+                        # Errors from tool results
+                        if name == "Read" and "error" in str(inp).lower():
+                            result["errors_encountered"].append(str(inp)[:100])
+
+    except (IOError, OSError):
+        return None
+
+    return result
 
 
 def infer_domain(changed_files):
@@ -54,110 +127,127 @@ def infer_domain(changed_files):
     return ext_map.get(top_ext, "general")
 
 
-def extract_skills(output, changed_files, outcome):
-    """Extract skill entries from session output.
-
-    Captures: file operations, framework usage, tool commands,
-    error patterns, and Chinese output patterns.
-    """
+def extract_skills(transcript_data, changed_files, outcome):
+    """Extract meaningful skills from parsed transcript data."""
     skills = []
-    domain = infer_domain(changed_files)
-
-    if not output or len(output) < 10:
+    if not transcript_data:
         return skills
 
-    lower = output.lower()
+    domain = infer_domain(changed_files)
+    tool_counts = transcript_data.get("tool_counts", {})
+    bash_cmds = transcript_data.get("bash_commands", [])
+    files_edited = transcript_data.get("files_edited", [])
+    user_msgs = transcript_data.get("user_messages", [])
+    total = transcript_data.get("total_tool_calls", 0)
 
-    # 1. File operation patterns (most reliable)
-    file_ops = [
-        (r"(?:created?|wrote?|编写|创建)\s+(?:a\s+)?(?:new\s+)?(?:file|脚本|模块|文件)\s*[:\-]?\s*(.+)", "file_creation"),
-        (r"(?:edited?|modified?|updated?|修改|更新)\s+(.+)", "file_edit"),
-        (r"(?:deleted?|removed?|删除)\s+(.+)", "file_removal"),
-    ]
-    for pattern, skill_type in file_ops:
-        matches = re.findall(pattern, lower)
-        for m in matches[:2]:
-            text = m.strip()[:100]
-            if len(text) > 5:
-                skills.append({
-                    "name": f"{skill_type}_{text[:30]}",
-                    "domain": domain,
-                    "pattern": text,
-                    "weight": 1.0 if outcome == "success" else 0.5,
-                })
+    # 1. High-level session summary skill (always create)
+    file_count = len(set(files_edited))
+    bash_count = len(bash_cmds)
+    edit_count = tool_counts.get("Edit", 0) + tool_counts.get("Write", 0)
 
-    # 2. Framework/library usage
-    framework_patterns = [
-        (r"(?:used?|using|使用)\s+(fastapi|flask|django|react|vue|express|gin|axum|actix)", "framework_use"),
-        (r"(?:installed?|安装)\s+(\w+)", "tool_install"),
-        (r"(?:pip|npm|cargo|go)\s+(?:install|add)\s+(\S+)", "package_install"),
-    ]
-    for pattern, skill_type in framework_patterns:
-        matches = re.findall(pattern, lower)
-        for m in matches[:2]:
-            text = m.strip()[:80]
-            if len(text) > 2:
-                skills.append({
-                    "name": f"{skill_type}_{text[:30]}",
-                    "domain": domain,
-                    "pattern": text,
-                    "weight": 0.9,
-                })
+    if file_count > 0:
+        # Extract what files were worked on
+        basenames = list(set(
+            os.path.basename(f) for f in files_edited
+        ))[:5]
+        skills.append({
+            "name": f"session_{domain}_{file_count}files",
+            "domain": domain,
+            "pattern": f"Worked on {file_count} files ({', '.join(basenames)}): {edit_count} edits, {bash_count} commands",
+            "weight": 1.0 if outcome == "success" else 0.5,
+        })
 
-    # 3. Task completion (broad patterns)
-    task_patterns = [
-        (r"(?:完成|done|completed?|finished?|搞定|实现|implement).{0,80}", "task_complete"),
-        (r"(?:修复|fix(?:ed|ing)?|解决|resolve).{0,80}", "bug_fix"),
-        (r"(?:重构|refactor).{0,80}", "refactoring"),
-        (r"(?:部署|deploy).{0,80}", "deployment"),
-        (r"(?:测试|test(?:ing|ed)?).{0,80}", "testing"),
-        (r"(?:优化|optimiz).{0,80}", "optimization"),
-    ]
-    for pattern, skill_type in task_patterns:
-        matches = re.findall(pattern, lower)
-        for m in matches[:1]:
-            text = m.strip()[:100]
-            if len(text) > 8:
-                skills.append({
-                    "name": f"{skill_type}_{text[:30]}",
-                    "domain": domain,
-                    "pattern": text,
-                    "weight": 1.0 if outcome == "success" else 0.5,
-                })
-
-    # 4. Error recovery (if succeeded despite errors)
-    if outcome == "success" and ("error" in lower or "exception" in lower or "错误" in lower):
-        error_bits = re.findall(r"(?:error|exception|traceback|错误|异常).{0,80}", lower)
-        for eb in error_bits[:1]:
+    # 2. Tool usage patterns — what tools were heavily used
+    for tool, count in tool_counts.items():
+        if count >= 5 and tool not in ("Read", "TaskUpdate", "TaskCreate"):
             skills.append({
-                "name": f"error_recovery_{domain}",
+                "name": f"tool_pattern_{tool.lower()}",
                 "domain": domain,
-                "pattern": f"Resolved: {eb[:80]}",
+                "pattern": f"Used {tool} {count} times in session",
                 "weight": 0.8,
             })
 
-    # 5. Changed files as skills (always capture what was worked on)
-    if changed_files and outcome == "success":
-        for f in changed_files[:3]:
-            fname = f.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]  # basename
-            if len(fname) > 3:
+    # 3. Bash command patterns — extract repeated commands
+    if bash_cmds:
+        # Normalize commands (strip args)
+        cmd_roots = []
+        for cmd in bash_cmds:
+            # Get first word (the actual command)
+            root = cmd.split()[0] if cmd.split() else ""
+            # Skip common noise
+            if root in ("cd", "echo", "ls", "cat", "pwd", ""):
+                continue
+            cmd_roots.append(root)
+
+        cmd_counts = Counter(cmd_roots)
+        for cmd, count in cmd_counts.most_common(3):
+            if count >= 2:
                 skills.append({
-                    "name": f"worked_on_{fname[:30]}",
+                    "name": f"bash_pattern_{cmd.replace('/', '_').replace('-', '_')[:30]}",
                     "domain": domain,
-                    "pattern": f"Modified {fname}",
+                    "pattern": f"Repeated command: {cmd} ({count}x)",
                     "weight": 0.7,
                 })
+
+    # 4. Framework/library detection from bash commands
+    frameworks = set()
+    for cmd in bash_cmds:
+        cmd_lower = cmd.lower()
+        for fw in ("fastapi", "flask", "django", "react", "vue", "express",
+                    "gin", "axum", "actix", "uvicorn", "pytest", "jest"):
+            if fw in cmd_lower:
+                frameworks.add(fw)
+        # pip/npm install detection
+        if "pip install" in cmd_lower:
+            pkgs = re.findall(r"pip install\s+(\S+)", cmd_lower)
+            frameworks.update(pkgs[:3])
+        if "npm install" in cmd_lower or "npm i " in cmd_lower:
+            frameworks.add("npm")
+
+    for fw in list(frameworks)[:3]:
+        skills.append({
+            "name": f"framework_{fw}",
+            "domain": domain,
+            "pattern": f"Used {fw} in this session",
+            "weight": 0.9,
+        })
+
+    # 5. File clustering — which files are often edited together
+    if len(files_edited) >= 3:
+        # Group by directory
+        dirs = Counter()
+        for f in files_edited:
+            d = os.path.dirname(f).replace("\\", "/").split("/")[-1]
+            if d:
+                dirs[d] += 1
+        for d, count in dirs.most_common(2):
+            if count >= 2:
+                skills.append({
+                    "name": f"cluster_{d.replace('-', '_').replace('.', '_')[:30]}",
+                    "domain": domain,
+                    "pattern": f"Active cluster: {d}/ ({count} edits)",
+                    "weight": 0.6,
+                })
+
+    # 6. Error recovery patterns
+    if outcome == "success" and transcript_data.get("errors_encountered"):
+        skills.append({
+            "name": f"error_recovery_{domain}",
+            "domain": domain,
+            "pattern": f"Recovered from {len(transcript_data['errors_encountered'])} errors",
+            "weight": 0.8,
+        })
 
     # Deduplicate by name prefix
     seen = set()
     unique = []
     for s in skills:
-        key = s["name"][:20]
+        key = s["name"][:25]
         if key not in seen:
             seen.add(key)
             unique.append(s)
 
-    return unique[:5]  # Max 5 skills per session
+    return unique[:8]  # Max 8 skills per session
 
 
 def main():
@@ -171,6 +261,7 @@ def main():
     session_id = data.get("session_id", "unknown")
     interaction_type = data.get("interaction_type", "chat")
     relevant_output = data.get("relevant_output", "")
+    transcript_path = data.get("transcript_path", "")
 
     # Read tracked changed files
     changed_files = []
@@ -182,48 +273,84 @@ def main():
         except Exception:
             pass
 
-    # Determine outcome from output content
+    # Parse transcript for rich data
+    transcript_data = parse_transcript(transcript_path)
+
+    # If no transcript, fall back to relevant_output
+    if not transcript_data and relevant_output:
+        transcript_data = {
+            "tool_counts": {},
+            "files_edited": changed_files,
+            "bash_commands": [],
+            "errors_encountered": [],
+            "user_messages": [relevant_output[:200]],
+            "total_tool_calls": 0,
+        }
+
+    # Determine outcome
     outcome = "success"
-    if relevant_output:
-        lower = relevant_output.lower()
-        if any(k in lower for k in ("error", "failed", "exception", "traceback")):
-            outcome = "failure"
-        elif any(k in lower for k in ("partial", "incomplete", "couldn't")):
-            outcome = "partial"
+    all_text = (relevant_output + " ".join(
+        transcript_data.get("user_messages", []) if transcript_data else []
+    )).lower() if relevant_output or transcript_data else ""
+    if any(k in all_text for k in ("error", "failed", "exception", "traceback")):
+        outcome = "failure"
+    elif any(k in all_text for k in ("partial", "incomplete")):
+        outcome = "partial"
 
     domain = infer_domain(changed_files)
     now = datetime.now()
 
-    # Build lessons summary
-    lessons = relevant_output[:500] if relevant_output else ""
+    # Build rich goal summary from transcript
+    if transcript_data and transcript_data.get("user_messages"):
+        # Use first user message as goal
+        first_msg = transcript_data["user_messages"][0][:100]
+        goal = first_msg
+    else:
+        goal = f"Claude Code {interaction_type} on {domain}"
+
+    # Build lessons from transcript summary
+    lessons_parts = []
+    if transcript_data:
+        tc = transcript_data.get("tool_counts", {})
+        fe = len(set(transcript_data.get("files_edited", [])))
+        bc = len(transcript_data.get("bash_commands", []))
+        lessons_parts.append(f"{fe} files, {bc} commands, {transcript_data.get('total_tool_calls', 0)} tool calls")
+    if changed_files:
+        basenames = [os.path.basename(f) for f in changed_files[:5]]
+        lessons_parts.append(f"Modified: {', '.join(basenames)}")
+    lessons = "; ".join(lessons_parts)
 
     # Log session
     result = api("POST", "/session/log", {
         "session_id": session_id,
         "tool": "claude_code",
-        "goal": f"Claude Code {interaction_type} on {domain} ({now.strftime('%Y-%m-%d %H:%M')})",
+        "goal": goal,
         "outcome": outcome,
         "lessons": lessons,
         "changed_files": changed_files,
         "duration_sec": 0,
     })
 
-    # Extract and save skills
-    skills = extract_skills(relevant_output, changed_files, outcome)
+    # Extract and save skills to /skills/ endpoint
+    skills = extract_skills(transcript_data, changed_files, outcome)
     skills_saved = 0
     for skill in skills:
-        skill_result = api("POST", "/memory/add", {
+        skill_result = api("POST", "/skills/", {
             "name": skill["name"],
             "domain": skill["domain"],
             "pattern": skill["pattern"],
-            "description": skill.get("pattern", ""),
+            "weight": skill["weight"],
             "source": "session",
         })
         if skill_result.get("ok"):
             skills_saved += 1
 
     if result.get("ok"):
-        msg = f"[evo] Session {session_id} logged ({outcome}, {len(changed_files)} files, {skills_saved} skills)"
+        msg = (
+            f"[evo] Session {session_id[:12]} logged "
+            f"({outcome}, {len(changed_files)} files, "
+            f"{skills_saved} skills extracted)"
+        )
         print(msg, file=sys.stderr)
 
 
