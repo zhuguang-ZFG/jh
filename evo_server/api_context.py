@@ -10,6 +10,7 @@ from typing import Optional, List, Dict
 from .db import get_conn
 from .models import ApiResponse
 from .vec_search import vec_search
+from .embedding import embed_text
 from .keywords import extract_keywords
 from . import config
 
@@ -143,25 +144,48 @@ class ContextBatchRequest(BaseModel):
     )
 
 
+_batch_cache = {}  # {cache_key: {"ts": float, "data": dict}}
+_BATCH_CACHE_TTL = 60  # seconds
+
+
 @router.post("/batch")
 def batch_context(q: ContextBatchRequest):
-    """Single-request context batch — replaces 6+ serial API calls from hooks."""
+    """Single-request context batch — replaces 6+ serial API calls from hooks.
+
+    Optimizations:
+    - Embed query once, share across all vec_search calls
+    - Briefing reuses already-searched results (no duplicate vec_search)
+    - In-memory cache for repeated identical requests (60s TTL)
+    """
+    # Check cache
+    cache_key = f"{q.task}:{q.domain}:{q.limit}:{':'.join(sorted(q.include))}"
+    now = time.time()
+    cached = _batch_cache.get(cache_key)
+    if cached and (now - cached["ts"]) < _BATCH_CACHE_TTL:
+        return ApiResponse(ok=True, data=cached["data"])
+
     conn = get_conn()
     data = {}
 
+    # Pre-compute embedding once for all vec_search calls
+    task_emb = embed_text(q.task) if q.task else None
+
     if "skills" in q.include:
         skills = vec_search(conn, "skills", q.task, limit=q.limit,
-                            min_weight=0.2, domain=q.domain)
+                            min_weight=0.2, domain=q.domain,
+                            precomputed_emb=task_emb)
         data["skills"] = [_format_skill(r) for r in skills]
 
     if "patterns" in q.include:
         patterns = vec_search(conn, "patterns", q.task, limit=q.limit,
-                              min_weight=0.3, domain=q.domain)
+                              min_weight=0.3, domain=q.domain,
+                              precomputed_emb=task_emb)
         data["patterns"] = [_format_pattern(r) for r in patterns]
 
     if "failures" in q.include:
         if q.task:
-            failures = vec_search(conn, "failure_patterns", q.task, limit=q.limit)
+            failures = vec_search(conn, "failure_patterns", q.task, limit=q.limit,
+                                  precomputed_emb=task_emb)
             data["failures"] = [{k: v for k, v in f.items() if k != "_score"} for f in failures]
         else:
             rows = conn.execute(
@@ -176,7 +200,6 @@ def batch_context(q: ContextBatchRequest):
             (min(q.limit * 2, 20),),
         ).fetchall()
         all_convs = [dict(r) for r in rows]
-        # Filter to relevant conventions if we have a task
         if q.task:
             lang = ""
             task_lower = q.task.lower()
@@ -200,19 +223,19 @@ def batch_context(q: ContextBatchRequest):
         data["git_patterns"] = [dict(r) for r in rows]
 
     if "briefing" in q.include and q.task:
-        # Generate briefing inline (same logic as api_briefing.py)
-        skills_b = vec_search(conn, "skills", q.task, limit=q.limit, min_weight=0.3, domain=q.domain)
-        patterns_b = vec_search(conn, "patterns", q.task, limit=q.limit, min_weight=0.3, domain=q.domain)
-        failures_b = vec_search(conn, "failure_patterns", q.task, limit=q.limit)
+        # Reuse already-searched results instead of re-running vec_search
+        skills_for_briefing = data.get("skills", [])
+        patterns_for_briefing = data.get("patterns", [])
+        failures_for_briefing = data.get("failures", [])
         warnings = []
-        for f in failures_b:
+        for f in failures_for_briefing:
             fix = f.get("fix_suggestion", "")
             if fix:
                 warnings.append(f"{f.get('error_type', '?')}: {fix[:100]}")
         data["briefing"] = {
             "warnings": warnings,
-            "skills_count": len(skills_b),
-            "patterns_count": len(patterns_b),
+            "skills_count": len(skills_for_briefing),
+            "patterns_count": len(patterns_for_briefing),
         }
 
     if "best_practices" in q.include:
@@ -244,11 +267,15 @@ def batch_context(q: ContextBatchRequest):
 
     if "memories" in q.include and q.task:
         memories = vec_search(conn, "memories", q.task, limit=q.limit,
-                              min_weight=0.3, domain=q.domain)
+                              min_weight=0.3, domain=q.domain,
+                              precomputed_emb=task_emb)
         data["memories"] = [
             {k: v for k, v in m.items() if k != "_score"}
             for m in memories
         ]
+
+    # Update cache
+    _batch_cache[cache_key] = {"ts": now, "data": data}
 
     return ApiResponse(ok=True, data=data)
 

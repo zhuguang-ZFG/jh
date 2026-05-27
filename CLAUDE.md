@@ -1,11 +1,11 @@
 # Project Coding Guidelines (Auto-generated)
 
-> Generated from 9 sessions, 50 skills, 25 patterns
-> Last updated: 2026-05-28 00:10
+> Generated from 12 sessions, 50 skills, 25 patterns
+> Last updated: 2026-05-28 01:30
 
 ## Active Domains
 
-- **general**: 5 successful sessions
+- **general**: 8 successful sessions
 - **python**: 3 successful sessions
 
 ## Known Failure Patterns (Avoid These)

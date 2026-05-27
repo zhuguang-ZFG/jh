@@ -29,10 +29,11 @@ VEC_TABLES = {
 
 
 def vec_search(conn, table: str, query: str, limit: int = 10,
-               min_weight: float = 0.0, domain: str = "") -> List[dict]:
+               min_weight: float = 0.0, domain: str = "",
+               precomputed_emb=None) -> List[dict]:
     """Vector similarity search using sqlite-vec cosine distance.
 
-    1. Embed the query text
+    1. Embed the query text (or use precomputed_emb)
     2. Search vec table for nearest neighbors
     3. Join with content table for full row data
     4. Fallback to LIKE if vec search fails
@@ -45,8 +46,8 @@ def vec_search(conn, table: str, query: str, limit: int = 10,
 
     vec_table = config["vec_table"]
 
-    # Embed query
-    query_vec = embed_text(query)
+    # Embed query (use precomputed if provided)
+    query_vec = precomputed_emb if precomputed_emb is not None else embed_text(query)
     if query_vec is None:
         logger.debug("Embedding failed, falling back to LIKE")
         return _like_fallback(conn, table, query, limit, min_weight, domain)

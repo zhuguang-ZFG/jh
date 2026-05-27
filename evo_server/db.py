@@ -223,6 +223,11 @@ CREATE INDEX IF NOT EXISTS idx_shared_knowledge_type ON shared_knowledge(knowled
 CREATE INDEX IF NOT EXISTS idx_shared_knowledge_project ON shared_knowledge(project_name);
 CREATE INDEX IF NOT EXISTS idx_memories_domain ON memories(domain);
 CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
+
+-- Composite indexes for common queries
+CREATE INDEX IF NOT EXISTS idx_prompt_outcomes_strategy_created ON prompt_outcomes(strategy, created_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_outcome_created ON sessions(outcome, created_at);
+CREATE INDEX IF NOT EXISTS idx_quality_phase_created ON quality_snapshots(phase, created_at);
 """
 
 

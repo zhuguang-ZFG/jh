@@ -1,6 +1,9 @@
 """Skills management with EMA weight updates."""
+import hashlib
 import time
 from fastapi import APIRouter, Body
+from pydantic import BaseModel, Field
+from typing import List
 from .db import get_conn
 from .models import SkillRecall, SkillUpdate, ApiResponse
 from . import config
@@ -49,6 +52,51 @@ def create_skill(
         _sync_skill_embedding(conn, row_id, name, domain, pattern)
     conn.commit()
     return ApiResponse(ok=True, data={"skill_key": key})
+
+
+class SkillItem(BaseModel):
+    name: str
+    domain: str = "general"
+    pattern: str = ""
+    weight: float = 1.0
+    source: str = "session"
+
+
+class BatchSkillRequest(BaseModel):
+    skills: List[SkillItem] = Field(..., min_length=1, max_length=20)
+
+
+@router.post("/batch")
+def batch_create_skills(req: BatchSkillRequest):
+    """Batch create or update multiple skills in one request."""
+    conn = get_conn()
+    now = time.time()
+    created = 0
+    updated = 0
+
+    for s in req.skills:
+        key = hashlib.sha256(f"{s.name}:{s.domain}:{s.pattern[:80]}".encode()).hexdigest()[:16]
+        try:
+            conn.execute(
+                """INSERT INTO skills (skill_key, name, domain, pattern, weight,
+                   use_count, success_count, created_at, last_used, source)
+                   VALUES (?, ?, ?, ?, ?, 0, 0, ?, 0, ?)""",
+                (key, s.name, s.domain, s.pattern, s.weight, now, s.source),
+            )
+            row_id = conn.execute("SELECT id FROM skills WHERE skill_key=?", (key,)).fetchone()["id"]
+            _sync_skill_embedding(conn, row_id, s.name, s.domain, s.pattern)
+            created += 1
+        except conn.IntegrityError:
+            conn.execute(
+                "UPDATE skills SET pattern=?, weight=MAX(weight,?), last_used=? WHERE skill_key=?",
+                (s.pattern, s.weight, now, key),
+            )
+            row_id = conn.execute("SELECT id FROM skills WHERE skill_key=?", (key,)).fetchone()["id"]
+            _sync_skill_embedding(conn, row_id, s.name, s.domain, s.pattern)
+            updated += 1
+
+    conn.commit()
+    return ApiResponse(ok=True, data={"created": created, "updated": updated})
 
 
 @router.get("/")
