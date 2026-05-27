@@ -11,6 +11,7 @@ from .db import get_conn
 from .models import ApiResponse
 from .vec_search import vec_search
 from .keywords import extract_keywords
+from . import config
 
 router = APIRouter(prefix="/context", tags=["context"])
 
@@ -127,6 +128,129 @@ def context_summary():
             lines.append("- {}".format(r["rule_value"][:100]))
 
     return ApiResponse(ok=True, data={"summary": "\n".join(lines)})
+
+
+# ── Batch endpoint (single request for all context) ────────────
+
+class ContextBatchRequest(BaseModel):
+    task: str
+    domain: str = ""
+    limit: int = Field(default=5, ge=1, le=30)
+    include: List[str] = Field(
+        default=["skills", "patterns", "failures", "conventions",
+                 "git_patterns", "briefing", "best_practices", "memories"],
+        description="Which data categories to include",
+    )
+
+
+@router.post("/batch")
+def batch_context(q: ContextBatchRequest):
+    """Single-request context batch — replaces 6+ serial API calls from hooks."""
+    conn = get_conn()
+    data = {}
+
+    if "skills" in q.include:
+        skills = vec_search(conn, "skills", q.task, limit=q.limit,
+                            min_weight=0.2, domain=q.domain)
+        data["skills"] = [_format_skill(r) for r in skills]
+
+    if "patterns" in q.include:
+        patterns = vec_search(conn, "patterns", q.task, limit=q.limit,
+                              min_weight=0.3, domain=q.domain)
+        data["patterns"] = [_format_pattern(r) for r in patterns]
+
+    if "failures" in q.include:
+        if q.task:
+            failures = vec_search(conn, "failure_patterns", q.task, limit=q.limit)
+            data["failures"] = [{k: v for k, v in f.items() if k != "_score"} for f in failures]
+        else:
+            rows = conn.execute(
+                "SELECT * FROM failure_patterns ORDER BY occurrences DESC LIMIT ?",
+                (q.limit,),
+            ).fetchall()
+            data["failures"] = [dict(r) for r in rows]
+
+    if "conventions" in q.include:
+        rows = conn.execute(
+            "SELECT * FROM conventions ORDER BY confidence DESC LIMIT ?",
+            (min(q.limit * 2, 20),),
+        ).fetchall()
+        all_convs = [dict(r) for r in rows]
+        # Filter to relevant conventions if we have a task
+        if q.task:
+            lang = ""
+            task_lower = q.task.lower()
+            for ext, lang_name in [("py", "python"), ("js", "javascript"), ("ts", "typescript")]:
+                if ext in task_lower:
+                    lang = lang_name
+                    break
+            relevant = [c for c in all_convs
+                        if lang and (lang in c.get("rule", "").lower()
+                                     or lang in c.get("example", "").lower()
+                                     or c.get("category") == "structure")]
+            data["conventions"] = relevant[:4] if relevant else all_convs[:4]
+        else:
+            data["conventions"] = all_convs[:4]
+
+    if "git_patterns" in q.include:
+        rows = conn.execute(
+            "SELECT * FROM git_patterns ORDER BY confidence DESC LIMIT ?",
+            (min(q.limit, 10),),
+        ).fetchall()
+        data["git_patterns"] = [dict(r) for r in rows]
+
+    if "briefing" in q.include and q.task:
+        # Generate briefing inline (same logic as api_briefing.py)
+        skills_b = vec_search(conn, "skills", q.task, limit=q.limit, min_weight=0.3, domain=q.domain)
+        patterns_b = vec_search(conn, "patterns", q.task, limit=q.limit, min_weight=0.3, domain=q.domain)
+        failures_b = vec_search(conn, "failure_patterns", q.task, limit=q.limit)
+        warnings = []
+        for f in failures_b:
+            fix = f.get("fix_suggestion", "")
+            if fix:
+                warnings.append(f"{f.get('error_type', '?')}: {fix[:100]}")
+        data["briefing"] = {
+            "warnings": warnings,
+            "skills_count": len(skills_b),
+            "patterns_count": len(patterns_b),
+        }
+
+    if "best_practices" in q.include:
+        cutoff = time.time() - 90 * 86400
+        lam = config.EMA_PROMPT_LAMBDA
+        rows = conn.execute(
+            f"""SELECT strategy, prompt_type,
+                       COUNT(*) as uses,
+                       SUM(CASE WHEN outcome='success'
+                           THEN exp(-{lam} * ({cutoff} - created_at) / 86400.0) ELSE 0 END) /
+                       SUM(exp(-{lam} * ({cutoff} - created_at) / 86400.0)) as ema_rate
+                FROM prompt_outcomes
+                WHERE strategy != '' AND created_at > {cutoff}
+                GROUP BY strategy, prompt_type
+                HAVING uses >= 2
+                ORDER BY ema_rate DESC
+                LIMIT ?""",
+            (min(q.limit, 10),),
+        ).fetchall()
+        data["best_practices"] = [
+            {
+                "strategy": r["strategy"],
+                "prompt_type": r["prompt_type"],
+                "uses": r["uses"],
+                "ema_rate": round(r["ema_rate"], 4) if r["ema_rate"] else 0,
+            }
+            for r in rows
+        ]
+
+    if "memories" in q.include and q.task:
+        memories = vec_search(conn, "memories", q.task, limit=q.limit,
+                              min_weight=0.3, domain=q.domain)
+        data["memories"] = [
+            {k: v for k, v in m.items() if k != "_score"}
+            for m in memories
+        ]
+
+    return ApiResponse(ok=True, data=data)
 
 
 # ── Helpers ───────────────────────────────────────────────────

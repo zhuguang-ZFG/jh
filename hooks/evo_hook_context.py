@@ -339,65 +339,30 @@ def main():
     else:
         all_data = {}
 
-        # 1. Query skills/patterns
-        if keywords:
-            ctx = api_post("/context/query", {"task": " ".join(keywords), "limit": 5})
-            if ctx and ctx.get("ok"):
-                all_data.update(ctx.get("data", {}))
+        # Single batch request — replaces 6+ serial API calls
+        task_text = " ".join(keywords) if keywords else ""
+        if task_text:
+            batch = api_post("/context/batch", {
+                "task": task_text,
+                "domain": lang or "",
+                "limit": 5,
+                "include": ["skills", "patterns", "failures", "conventions",
+                           "git_patterns", "briefing", "best_practices", "memories"],
+            })
+            if batch and batch.get("ok"):
+                all_data = batch.get("data", {})
 
-        # 2. Query failure patterns
-        failures = api_post("/learn/failures/relevant", {"context": " ".join(keywords), "limit": 3})
-        if failures and failures.get("ok"):
-            all_data["failures"] = failures.get("data", [])
-
-        # 3. Query conventions (by language)
-        if lang:
-            convs = api_get(f"/learn/conventions?category=&limit=10")
-            if convs and convs.get("ok"):
-                # Filter to relevant conventions
-                all_convs = convs.get("data", [])
-                relevant = [c for c in all_convs if lang in c.get("rule", "").lower()
-                           or lang in c.get("example", "").lower()
-                           or c.get("category") == "structure"]
-                if not relevant:
-                    relevant = all_convs[:4]  # fallback: show all
-                all_data["conventions"] = relevant
-
-        # 4. Query git patterns
-        git_pats = api_get("/learn/git-patterns?limit=5")
-        if git_pats and git_pats.get("ok"):
-            all_data["git_patterns"] = git_pats.get("data", [])
-
-        # 5. Query briefing for task-specific knowledge
-        if keywords:
-            briefing = api_post("/briefing", {"task_summary": " ".join(keywords), "limit": 3})
-            if briefing and briefing.get("ok"):
-                bdata = briefing.get("data", {})
-                # Merge briefing warnings into failures
-                if bdata.get("warnings"):
+                # Merge briefing warnings into failures (compat with old format)
+                briefing = all_data.get("briefing", {})
+                if briefing.get("warnings"):
                     existing_failures = all_data.get("failures", [])
-                    for w in bdata["warnings"]:
+                    for w in briefing["warnings"]:
                         existing_failures.append({"error_type": "warning", "description": w, "fix_suggestion": ""})
                     all_data["failures"] = existing_failures[:5]
 
-        # 6. Query best practices (EMA-ranked strategies)
-        best_pracs = api_get("/prompts/best-ema?limit=5")
-        if best_pracs and best_pracs.get("ok"):
-            all_data["best_practices"] = best_pracs.get("data", [])
-
-        # 7. Query past memories (vectorized cross-session knowledge)
-        if keywords:
-            memories = api_post("/memories/recall", {
-                "query": " ".join(keywords),
-                "limit": 5,
-                "min_weight": 0.3,
-            })
-            if memories and memories.get("ok"):
-                all_data["memories"] = memories.get("data", [])
-
         save_cache(cache_key, all_data)
 
-    # 5. Dependency-aware + test-aware (always fresh, not cached)
+    # Dependency-aware + test-aware (always fresh, not cached)
     all_data["dependencies"] = extract_dependencies(file_path)
     all_data["test_files"] = find_test_files(file_path)
 
@@ -406,7 +371,7 @@ def main():
     if context_text:
         print(context_text)
 
-    # 5. Auto-refresh CLAUDE.md (non-blocking, runs occasionally)
+    # Auto-refresh CLAUDE.md (non-blocking, runs occasionally)
     project_root = os.path.dirname(os.path.dirname(file_path))
     if project_root and os.path.isdir(project_root):
         try:

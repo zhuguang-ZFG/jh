@@ -629,22 +629,54 @@ def main():
         )
         print(msg, file=sys.stderr)
 
-    # ── Extract memories for cross-session recall ──
-    memories = extract_memories(transcript_data, changed_files, outcome, domain)
+    # ── Extract memories (LLM-enhanced with local fallback) ──
     memories_saved = 0
-    for mem in memories:
-        mem_result = api("POST", "/memories/", {
+    llm_used = False
+
+    if transcript_data:
+        # Try LLM-enhanced extraction first
+        transcript_summary = {
+            "user_messages": transcript_data.get("user_messages", [])[:10],
+            "files_edited": list(set(
+                transcript_data.get("files_edited", []) +
+                transcript_data.get("files_written", []) +
+                changed_files
+            ))[:20],
+            "bash_commands": [bp.get("full", bp.get("root", ""))
+                             for bp in transcript_data.get("bash_patterns", [])][:15],
+            "errors_encountered": transcript_data.get("errors_encountered", [])[:5],
+            "outcome": outcome,
+        }
+
+        llm_result = api("POST", "/memories/extract", {
             "session_id": session_id,
-            "category": mem["category"],
-            "content": mem["content"],
-            "domain": mem["domain"],
-            "confidence": mem["confidence"],
+            "transcript_summary": transcript_summary,
+            "domain": domain,
+            "max_memories": 5,
         })
-        if mem_result.get("ok"):
-            memories_saved += 1
+
+        if llm_result and llm_result.get("ok"):
+            llm_data = llm_result.get("data", {})
+            memories_saved = llm_data.get("saved", 0)
+            llm_used = True
+
+    # Fallback to local extraction if LLM failed or no transcript
+    if not llm_used:
+        memories = extract_memories(transcript_data, changed_files, outcome, domain)
+        for mem in memories:
+            mem_result = api("POST", "/memories/", {
+                "session_id": session_id,
+                "category": mem["category"],
+                "content": mem["content"],
+                "domain": mem["domain"],
+                "confidence": mem["confidence"],
+            })
+            if mem_result.get("ok"):
+                memories_saved += 1
 
     if memories_saved:
-        print(f"[evo] {memories_saved} memories saved", file=sys.stderr)
+        mode = "LLM" if llm_used else "local"
+        print(f"[evo] {memories_saved} memories saved ({mode})", file=sys.stderr)
 
     # Log prompt outcome for auto-tuning
     prompt_type = domain  # use domain as prompt_type
