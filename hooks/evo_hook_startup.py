@@ -88,7 +88,8 @@ def main():
             import subprocess
             result = subprocess.run(
                 ["git", "log", "--oneline", "-3", "--no-decorate"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, encoding="utf-8",
+                timeout=5,
                 cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             )
             if result.returncode == 0 and result.stdout.strip():
