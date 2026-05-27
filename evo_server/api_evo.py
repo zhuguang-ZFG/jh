@@ -5,6 +5,7 @@ from typing import List
 from fastapi import APIRouter
 from .db import get_conn
 from .models import EvoApprove, ApiResponse
+from .claude_md_generator import generate_claude_md
 
 router = APIRouter(prefix="/evolutions", tags=["evolutions"])
 
@@ -70,3 +71,10 @@ def create_evolution(category: str, summary: str, evidence_ids: List[str] = [], 
         return ApiResponse(ok=True, data={"evo_key": evo_key})
     except conn.IntegrityError:
         return ApiResponse(ok=False, message="Duplicate proposal")
+
+
+@router.get("/claude-md")
+def get_claude_md():
+    """Generate CLAUDE.md from accumulated session experience."""
+    result = generate_claude_md()
+    return ApiResponse(ok=True, data={"content": result["content"], "stats": result["stats"]})

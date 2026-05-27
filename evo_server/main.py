@@ -13,6 +13,8 @@ from .api_skills import router as skills_router
 from .api_evo import router as evo_router
 from .api_patterns import router as patterns_router
 from .api_lima import router as lima_router
+from .api_quality import router as quality_router
+from .api_context import router as context_router
 
 logger = logging.getLogger("evo")
 
@@ -167,6 +169,8 @@ app.include_router(skills_router)
 app.include_router(evo_router)
 app.include_router(patterns_router)
 app.include_router(lima_router)
+app.include_router(quality_router)
+app.include_router(context_router)
 
 
 # --- Health ---

@@ -83,6 +83,16 @@ CREATE TABLE IF NOT EXISTS events (
     recorded_at REAL NOT NULL
 );
 
+-- Quality snapshots (pre/post change analysis)
+CREATE TABLE IF NOT EXISTS quality_snapshots (
+    id INTEGER PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    phase TEXT NOT NULL,           -- "before" or "after"
+    snapshot TEXT DEFAULT '{}',    -- JSON: filepath -> metrics
+    delta TEXT DEFAULT '{}',       -- JSON: quality delta (after phase only)
+    created_at REAL NOT NULL
+);
+
 -- FTS index for skills + patterns
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     name, domain, pattern, description,
@@ -99,6 +109,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_created ON sessions(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_evolutions_status ON evolutions(status);
 CREATE INDEX IF NOT EXISTS idx_events_source ON events(source);
 CREATE INDEX IF NOT EXISTS idx_events_recorded ON events(recorded_at DESC);
+CREATE INDEX IF NOT EXISTS idx_quality_session ON quality_snapshots(session_id);
 """
 
 
