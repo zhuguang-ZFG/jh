@@ -1,6 +1,6 @@
 """Pydantic models for API request/response."""
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Any
 
 
 # --- Memory ---
@@ -61,4 +61,4 @@ class EvoApprove(BaseModel):
 class ApiResponse(BaseModel):
     ok: bool = True
     message: str = ""
-    data: Optional[dict] = None
+    data: Optional[Any] = None
