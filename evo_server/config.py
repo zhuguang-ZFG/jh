@@ -52,3 +52,10 @@ ZHIPU_API_KEY = os.getenv("ZHIPU_API_KEY", "")
 ALIBABA_API_KEY = os.getenv("ALIBABA_API_KEY", "")
 CF_ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID", "")
 CF_API_KEY = os.getenv("CF_API_KEY", "")
+
+# Embedding API (Alibaba text-embedding-v3)
+EMBEDDING_API_KEY = os.getenv("ALIBABA_EMBEDDING_API_KEY", "") or os.getenv("ALIBABA_API_KEY", "")
+EMBEDDING_DIM = 1024
+
+# EMA for prompt ranking
+EMA_PROMPT_LAMBDA = _float("EVO_EMA_LAMBDA", 0.05)

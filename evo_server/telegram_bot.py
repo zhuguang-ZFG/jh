@@ -9,6 +9,7 @@ from . import config
 
 logger = logging.getLogger("evo.telegram")
 
+_SERVER = os.getenv("EVO_SERVER", "http://127.0.0.1:8090")
 _client = None  # type: Optional[httpx.AsyncClient]
 _preferred_backend = None  # type: Optional[str]  # user-selected LLM backend name
 
@@ -308,6 +309,110 @@ async def handle_update(update: dict, db_conn):
         else:
             await send_message(chat_id, "No patterns yet.")
 
+    elif cmd == "/failures":
+        if arg:
+            rows = db_conn.execute(
+                "SELECT error_type, description, fix_suggestion, occurrences FROM failure_patterns "
+                "WHERE domain=? ORDER BY occurrences DESC LIMIT 10",
+                (arg,),
+            ).fetchall()
+        else:
+            rows = db_conn.execute(
+                "SELECT error_type, description, fix_suggestion, occurrences FROM failure_patterns "
+                "ORDER BY occurrences DESC LIMIT 10"
+            ).fetchall()
+        if rows:
+            lines = [f"*Failure Patterns{' (' + arg + ')' if arg else ''}*"]
+            for r in rows:
+                fix = f"\n  Fix: {r['fix_suggestion'][:80]}" if r["fix_suggestion"] else ""
+                lines.append(f"• [{r['error_type']}] occ={r['occurrences']}\n  {r['description'][:80]}{fix}")
+            await send_message(chat_id, "\n".join(lines))
+        else:
+            await send_message(chat_id, "No failure patterns recorded yet.")
+
+    elif cmd == "/briefing":
+        if not arg:
+            await send_message(chat_id, "Usage: /briefing <task description>")
+            return
+        import httpx
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"{_SERVER}/briefing",
+                json={"task_summary": arg, "limit": 3},
+            )
+            data = r.json().get("data", {})
+        lines = [f"*Briefing: {arg[:50]}*"]
+        if data.get("relevant_skills"):
+            lines.append("\n*Skills:*")
+            for s in data["relevant_skills"][:3]:
+                lines.append(f"  • [{s['domain']}] {s['name']} (w={s['weight']:.2f})")
+        if data.get("relevant_patterns"):
+            lines.append("\n*Patterns:*")
+            for p in data["relevant_patterns"][:3]:
+                lines.append(f"  • [{p['domain']}] {p['name']} (conf={p['confidence']:.1f})")
+        if data.get("warnings"):
+            lines.append("\n*Warnings:*")
+            for w in data["warnings"][:3]:
+                lines.append(f"  {w}")
+        if not data.get("relevant_skills") and not data.get("relevant_patterns"):
+            lines.append("No relevant knowledge found. Starting fresh!")
+        await send_message(chat_id, "\n".join(lines))
+
+    elif cmd == "/prompts":
+        import httpx
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(f"{_SERVER}/prompts/stats")
+            stats = r.json().get("data", [])
+        if stats:
+            lines = ["*Prompt Type Success Rates*"]
+            for s in stats[:8]:
+                bar = "█" * int(s["success_rate"] * 10) + "░" * (10 - int(s["success_rate"] * 10))
+                lines.append(
+                    f"• `{s['prompt_type']}` {bar} {s['success_rate']:.0%} "
+                    f"({s['successes']}/{s['total']})"
+                )
+            await send_message(chat_id, "\n".join(lines))
+        else:
+            await send_message(chat_id, "No prompt outcomes recorded yet.")
+
+    elif cmd == "/quality":
+        from .quality_trends import get_quality_trend, format_quality_report
+        trend = get_quality_trend(weeks=4)
+        report = format_quality_report(trend)
+        await send_message(chat_id, report)
+
+    elif cmd == "/shared":
+        import httpx
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(f"{_SERVER}/shared?limit=10")
+            items = r.json().get("data", [])
+        if items:
+            lines = ["*Shared Knowledge Pool*"]
+            for item in items:
+                lines.append(
+                    f"• `{item['name']}` [{item['knowledge_type']}] "
+                    f"from {item['project_name']} (conf={item['confidence']:.1f})"
+                )
+            await send_message(chat_id, "\n".join(lines))
+        else:
+            await send_message(chat_id, "No shared knowledge available.")
+
+    elif cmd == "/import":
+        if not arg:
+            await send_message(chat_id, "Usage: /import <share_key>")
+            return
+        import httpx
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(
+                f"{_SERVER}/shared/import",
+                json={"share_key": arg.strip(), "target_project": "current"},
+            )
+            result = r.json()
+        if result.get("ok"):
+            await send_message(chat_id, f"Imported {result['data']['type']} successfully!")
+        else:
+            await send_message(chat_id, f"Import failed: {result.get('data', {}).get('error', 'unknown')}")
+
     elif cmd == "/evo":
         rows = db_conn.execute(
             "SELECT id, category, summary, confidence FROM evolutions WHERE status='proposed' ORDER BY created_at DESC LIMIT 10"
@@ -516,6 +621,24 @@ async def handle_update(update: dict, db_conn):
         except Exception as e:
             await send_message(chat_id, f"❌ Learning failed: {e}")
 
+    elif cmd == "/best":
+        import httpx
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(f"{_SERVER}/prompts/best-ema?limit=5")
+            data = r.json().get("data", [])
+        if data:
+            lines = ["*Best Strategies (EMA weighted)*"]
+            for i, s in enumerate(data, 1):
+                rate = s.get("ema_rate", 0)
+                bar = "█" * int(rate * 10) + "░" * (10 - int(rate * 10))
+                lines.append(
+                    f"{i}. `{s['strategy'][:40]}` [{s['prompt_type']}]\n"
+                    f"   {bar} {rate:.0%} ({s['uses']} uses)"
+                )
+            await send_message(chat_id, "\n".join(lines))
+        else:
+            await send_message(chat_id, "No strategies with enough data yet (need 2+ uses).")
+
     elif cmd == "/help":
         await send_message(
             chat_id,
@@ -524,6 +647,7 @@ async def handle_update(update: dict, db_conn):
             "/memory <query> — Search memories\n"
             "/skills — Top skills\n"
             "/patterns [domain] — Learned patterns\n"
+            "/best — Best strategies (EMA ranked)\n"
             "/evo — Pending evolutions (with approve/reject buttons)\n"
             "/approve <id> — Approve evolution\n"
             "/reject <id> — Reject evolution\n"

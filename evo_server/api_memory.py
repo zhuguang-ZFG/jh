@@ -1,9 +1,10 @@
-"""Memory CRUD endpoints (L0 meta_rules + L1 skills FTS)."""
+"""Memory CRUD endpoints (L0 meta_rules + L1 skills vector search)."""
 import hashlib
 import time
 from fastapi import APIRouter, Depends
 from .db import get_conn
 from .models import MemoryQuery, MemoryAdd, ApiResponse
+from .vec_search import vec_search
 
 router = APIRouter(prefix="/memory", tags=["memory"])
 
@@ -17,17 +18,14 @@ def query_memory(q: MemoryQuery):
     conn = get_conn()
     results = []
 
-    # FTS search on skills
+    # Vector search on skills
     if q.keyword:
-        rows = conn.execute(
-            """SELECT id, skill_key, name, domain, pattern, weight, use_count,
-                      source, created_at, last_used
-               FROM skills
-               WHERE name LIKE ? OR pattern LIKE ? OR domain LIKE ?
-               ORDER BY weight DESC
-               LIMIT ?""",
-            (f"%{q.keyword}%", f"%{q.keyword}%", f"%{q.domain}%" if q.domain else f"%{q.keyword}%", q.limit),
-        ).fetchall()
+        search_text = q.keyword
+        if q.domain:
+            search_text = f"{q.keyword} in {q.domain} domain"
+        skills = vec_search(conn, "skills", search_text, limit=q.limit)
+        for s in skills:
+            results.append({k: v for k, v in s.items() if k != "_score"})
     elif q.domain:
         rows = conn.execute(
             """SELECT id, skill_key, name, domain, pattern, weight, use_count,
@@ -36,6 +34,8 @@ def query_memory(q: MemoryQuery):
                ORDER BY weight DESC LIMIT ?""",
             (q.domain, q.limit),
         ).fetchall()
+        for r in rows:
+            results.append(dict(r))
     else:
         rows = conn.execute(
             """SELECT id, skill_key, name, domain, pattern, weight, use_count,
@@ -43,9 +43,8 @@ def query_memory(q: MemoryQuery):
                FROM skills ORDER BY weight DESC LIMIT ?""",
             (q.limit,),
         ).fetchall()
-
-    for r in rows:
-        results.append(dict(r))
+        for r in rows:
+            results.append(dict(r))
 
     # Also search meta_rules
     if q.keyword:
@@ -70,13 +69,26 @@ def add_memory(m: MemoryAdd):
                VALUES (?, ?, ?, ?, ?, ?)""",
             (key, m.name, m.domain, m.pattern, now, m.source),
         )
+        row_id = conn.execute("SELECT id FROM skills WHERE skill_key=?", (key,)).fetchone()["id"]
+        _sync_embedding(conn, row_id, m.name, m.domain, m.pattern)
         conn.commit()
         return ApiResponse(ok=True, message=f"Added skill: {m.name}", data={"skill_key": key})
     except conn.IntegrityError:
-        # Update existing
         conn.execute(
             "UPDATE skills SET pattern=?, last_used=? WHERE skill_key=?",
             (m.pattern, now, key),
         )
+        row_id = conn.execute("SELECT id FROM skills WHERE skill_key=?", (key,)).fetchone()["id"]
+        _sync_embedding(conn, row_id, m.name, m.domain, m.pattern)
         conn.commit()
         return ApiResponse(ok=True, message=f"Updated skill: {m.name}", data={"skill_key": key})
+
+
+def _sync_embedding(conn, row_id, name, domain, pattern):
+    try:
+        from .vec_sync import sync_row_embedding
+        sync_row_embedding(conn, "skills", row_id, {
+            "name": name, "domain": domain, "pattern": pattern,
+        })
+    except Exception:
+        pass

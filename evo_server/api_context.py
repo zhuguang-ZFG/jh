@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
 from .db import get_conn
 from .models import ApiResponse
+from .vec_search import vec_search
+from .keywords import extract_keywords
 
 router = APIRouter(prefix="/context", tags=["context"])
 
@@ -31,40 +33,18 @@ def query_context(q: ContextQuery):
         "session_insights": [],
     }
 
-    # 1. Search skills by keyword match
-    keywords = _extract_keywords(q.task)
-    if keywords:
-        like_clauses = " OR ".join(["name LIKE ?" for _ in keywords])
-        like_params = ["%{}%".format(k) for k in keywords]
-        if q.domain:
-            rows = conn.execute(
-                "SELECT * FROM skills WHERE ({}) AND domain=? AND weight > 0.2 ORDER BY weight DESC LIMIT ?".format(like_clauses),
-                like_params + [q.domain, q.limit],
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM skills WHERE ({}) AND weight > 0.2 ORDER BY weight DESC LIMIT ?".format(like_clauses),
-                like_params + [q.limit],
-            ).fetchall()
-        result["skills"] = [_format_skill(r) for r in rows]
+    # 1. Vector search for skills
+    skills = vec_search(conn, "skills", q.task, limit=q.limit,
+                        min_weight=0.2, domain=q.domain)
+    result["skills"] = [_format_skill(r) for r in skills]
 
-    # 2. Search patterns by keyword match
-    if keywords:
-        like_clauses = " OR ".join(["name LIKE ?" for _ in keywords])
-        like_params = ["%{}%".format(k) for k in keywords]
-        if q.domain:
-            rows = conn.execute(
-                "SELECT * FROM patterns WHERE ({}) AND domain=? AND confidence > 0.3 ORDER BY confidence DESC LIMIT ?".format(like_clauses),
-                like_params + [q.domain, q.limit],
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM patterns WHERE ({}) AND confidence > 0.3 ORDER BY confidence DESC LIMIT ?".format(like_clauses),
-                like_params + [q.limit],
-            ).fetchall()
-        result["patterns"] = [_format_pattern(r) for r in rows]
+    # 2. Vector search for patterns
+    patterns = vec_search(conn, "patterns", q.task, limit=q.limit,
+                          min_weight=0.3, domain=q.domain)
+    result["patterns"] = [_format_pattern(r) for r in patterns]
 
-    # 3. Get relevant meta rules
+    # 3. Keyword search for meta rules (no vec table)
+    keywords = extract_keywords(q.task)
     if keywords:
         like_clauses = " OR ".join(["rule_value LIKE ?" for _ in keywords])
         like_params = ["%{}%".format(k) for k in keywords]
@@ -103,9 +83,10 @@ def query_context(q: ContextQuery):
            WHERE outcome='success' AND lessons != ''
            ORDER BY created_at DESC LIMIT 5"""
     ).fetchall()
+    kw_list = extract_keywords(q.task)
     for sr in session_rows:
         lesson = sr["lessons"]
-        if lesson and any(k in lesson.lower() for k in keywords):
+        if lesson and any(k in lesson.lower() for k in kw_list):
             result["session_insights"].append(lesson[:200])
 
     # Deduplicate

@@ -1,8 +1,12 @@
 """SQLite connection + schema migration (WAL mode)."""
 import sqlite3
+import math
 import os
+import logging
 from typing import Optional
 from . import config
+
+logger = logging.getLogger("evo.db")
 
 _conn = None  # type: Optional[sqlite3.Connection]
 
@@ -130,12 +134,72 @@ CREATE TABLE IF NOT EXISTS git_patterns (
     created_at REAL NOT NULL
 );
 
--- FTS index for skills + patterns
-CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-    name, domain, pattern, description,
-    content='skills', content_rowid='id',
-    tokenize='unicode61'
+-- Briefings (pre-session knowledge injection)
+CREATE TABLE IF NOT EXISTS briefings (
+    id INTEGER PRIMARY KEY,
+    task_summary TEXT NOT NULL,
+    relevant_skills TEXT DEFAULT '[]',
+    relevant_patterns TEXT DEFAULT '[]',
+    relevant_failures TEXT DEFAULT '[]',
+    warnings TEXT DEFAULT '[]',
+    created_at REAL NOT NULL
 );
+
+-- Prompt outcomes (prompt→result correlation tracking)
+CREATE TABLE IF NOT EXISTS prompt_outcomes (
+    id INTEGER PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    prompt_type TEXT NOT NULL,
+    prompt_text TEXT DEFAULT '',
+    strategy TEXT DEFAULT '',
+    outcome TEXT NOT NULL,
+    duration_sec INTEGER DEFAULT 0,
+    created_at REAL NOT NULL
+);
+
+-- Quality weekly (aggregated quality reports)
+CREATE TABLE IF NOT EXISTS quality_weekly (
+    id INTEGER PRIMARY KEY,
+    week_start TEXT NOT NULL,
+    avg_score REAL DEFAULT 0,
+    total_sessions INTEGER DEFAULT 0,
+    success_rate REAL DEFAULT 0,
+    top_improvements TEXT DEFAULT '[]',
+    top_regressions TEXT DEFAULT '[]',
+    snapshot_json TEXT DEFAULT '{}',
+    created_at REAL NOT NULL
+);
+
+-- Memories (cross-session vectorized knowledge)
+CREATE TABLE IF NOT EXISTS memories (
+    id INTEGER PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    category TEXT NOT NULL,
+    content TEXT NOT NULL,
+    domain TEXT DEFAULT 'general',
+    confidence REAL DEFAULT 0.5,
+    use_count INTEGER DEFAULT 0,
+    weight REAL DEFAULT 1.0,
+    created_at REAL NOT NULL,
+    last_used REAL DEFAULT 0
+);
+
+-- Shared knowledge (cross-project sharing)
+CREATE TABLE IF NOT EXISTS shared_knowledge (
+    id INTEGER PRIMARY KEY,
+    share_key TEXT UNIQUE NOT NULL,
+    project_name TEXT NOT NULL,
+    knowledge_type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    content TEXT NOT NULL,
+    confidence REAL DEFAULT 0.5,
+    imported_by TEXT DEFAULT '',
+    created_at REAL NOT NULL
+);
+
+-- Vector tables for semantic search (sqlite-vec)
+-- These are created after sqlite-vec extension is loaded
 
 -- indexes
 CREATE INDEX IF NOT EXISTS idx_skills_domain ON skills(domain);
@@ -151,6 +215,14 @@ CREATE INDEX IF NOT EXISTS idx_failure_domain ON failure_patterns(domain);
 CREATE INDEX IF NOT EXISTS idx_failure_type ON failure_patterns(error_type);
 CREATE INDEX IF NOT EXISTS idx_conventions_category ON conventions(category);
 CREATE INDEX IF NOT EXISTS idx_git_patterns_type ON git_patterns(pattern_type);
+CREATE INDEX IF NOT EXISTS idx_briefings_created ON briefings(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_prompt_outcomes_type ON prompt_outcomes(prompt_type);
+CREATE INDEX IF NOT EXISTS idx_prompt_outcomes_session ON prompt_outcomes(session_id);
+CREATE INDEX IF NOT EXISTS idx_quality_weekly_week ON quality_weekly(week_start);
+CREATE INDEX IF NOT EXISTS idx_shared_knowledge_type ON shared_knowledge(knowledge_type);
+CREATE INDEX IF NOT EXISTS idx_shared_knowledge_project ON shared_knowledge(project_name);
+CREATE INDEX IF NOT EXISTS idx_memories_domain ON memories(domain);
+CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
 """
 
 
@@ -163,7 +235,16 @@ def get_conn() -> sqlite3.Connection:
         _conn.execute("PRAGMA foreign_keys=ON")
         _conn.execute("PRAGMA busy_timeout=5000")
         _conn.row_factory = sqlite3.Row
+        _conn.create_function("exp", 1, math.exp)  # needed for EMA calculations
         _conn.executescript(SCHEMA_SQL)
+        # ALTER TABLE: add fix_suggestion if missing (SQLite no IF NOT EXISTS for ADD COLUMN)
+        try:
+            _conn.execute("ALTER TABLE failure_patterns ADD COLUMN fix_suggestion TEXT DEFAULT ''")
+        except Exception:
+            pass  # column already exists
+
+        # Load sqlite-vec extension + create vec tables
+        _init_vec_tables(_conn)
     return _conn
 
 
@@ -172,3 +253,37 @@ def close_conn():
     if _conn is not None:
         _conn.close()
         _conn = None
+
+
+def _init_vec_tables(conn: sqlite3.Connection):
+    """Load sqlite-vec extension and create vector tables."""
+    dim = config.EMBEDDING_DIM
+    try:
+        conn.enable_load_extension(True)
+        import sqlite_vec
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        logger.info(f"sqlite-vec loaded (dim={dim})")
+    except ImportError:
+        logger.warning("sqlite-vec not installed — vector search disabled")
+        return
+    except Exception as e:
+        logger.warning(f"sqlite-vec load failed: {e} — vector search disabled")
+        return
+
+    # Create vec tables for each content table
+    for vec_table, content_table in [
+        ("skills_vec", "skills"),
+        ("patterns_vec", "patterns"),
+        ("failures_vec", "failure_patterns"),
+        ("memories_vec", "memories"),
+    ]:
+        try:
+            conn.execute(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS {vec_table} "
+                f"USING vec0(id INTEGER PRIMARY KEY, embedding float[{dim}])"
+            )
+        except Exception as e:
+            logger.warning(f"Create {vec_table} failed: {e}")
+
+    conn.commit()

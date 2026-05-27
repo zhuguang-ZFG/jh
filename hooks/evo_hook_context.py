@@ -251,14 +251,34 @@ def format_context(all_data):
         for i in insights[:2]:
             lines.append(f"- {i[:120]}")
 
-    # 6. Dependency-aware context
+    # 6. Best practices (EMA-ranked strategies)
+    best_pracs = all_data.get("best_practices", [])
+    if best_pracs:
+        lines.append("## Best Practices")
+        for bp in best_pracs[:3]:
+            pct = int(bp.get("ema_rate", 0) * 100)
+            lines.append("- [%s] %s (%d%% success, %d uses)" % (
+                bp.get("prompt_type", ""), bp.get("strategy", "")[:80],
+                pct, bp.get("uses", 0)))
+
+    # 7. Past memories (cross-session vectorized knowledge)
+    memories = all_data.get("memories", [])
+    if memories:
+        lines.append("## Past Memories")
+        for m in memories[:5]:
+            cat = m.get("category", "")
+            content = m.get("content", "")[:120]
+            conf = m.get("confidence", 0.5)
+            lines.append(f"- [{cat}] {content} (conf={conf:.1f})")
+
+    # 8. Dependency-aware context
     deps = all_data.get("dependencies", {})
     local_deps = deps.get("local", [])
     if local_deps:
         lines.append("## Local Dependencies")
         lines.append(f"- Imports: {', '.join(local_deps[:5])}")
 
-    # 7. Test-aware context
+    # 9. Test-aware context
     test_files = all_data.get("test_files", [])
     if test_files:
         lines.append("## Related Tests")
@@ -347,6 +367,33 @@ def main():
         git_pats = api_get("/learn/git-patterns?limit=5")
         if git_pats and git_pats.get("ok"):
             all_data["git_patterns"] = git_pats.get("data", [])
+
+        # 5. Query briefing for task-specific knowledge
+        if keywords:
+            briefing = api_post("/briefing", {"task_summary": " ".join(keywords), "limit": 3})
+            if briefing and briefing.get("ok"):
+                bdata = briefing.get("data", {})
+                # Merge briefing warnings into failures
+                if bdata.get("warnings"):
+                    existing_failures = all_data.get("failures", [])
+                    for w in bdata["warnings"]:
+                        existing_failures.append({"error_type": "warning", "description": w, "fix_suggestion": ""})
+                    all_data["failures"] = existing_failures[:5]
+
+        # 6. Query best practices (EMA-ranked strategies)
+        best_pracs = api_get("/prompts/best-ema?limit=5")
+        if best_pracs and best_pracs.get("ok"):
+            all_data["best_practices"] = best_pracs.get("data", [])
+
+        # 7. Query past memories (vectorized cross-session knowledge)
+        if keywords:
+            memories = api_post("/memories/recall", {
+                "query": " ".join(keywords),
+                "limit": 5,
+                "min_weight": 0.3,
+            })
+            if memories and memories.get("ok"):
+                all_data["memories"] = memories.get("data", [])
 
         save_cache(cache_key, all_data)
 

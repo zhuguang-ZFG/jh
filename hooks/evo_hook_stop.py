@@ -370,6 +370,148 @@ def extract_skills(transcript_data, changed_files, outcome):
     return unique[:10]  # Max 10 skills per session (was 8)
 
 
+def _is_noise_message(msg):
+    """Filter out system output, console dumps, and non-user-intent messages."""
+    text = msg.lower().strip()
+    # System / wrapper messages
+    noise_prefixes = [
+        "<local-command-caveat>",
+        "<system-reminder>",
+        "<command-name>",
+        "note:",
+        "warning:",
+        "error:",
+    ]
+    for p in noise_prefixes:
+        if text.startswith(p):
+            return True
+    # Cloud console output (instance info, UUIDs, etc.)
+    if any(k in text for k in ("实例id", "实例规格", "uuid", "instance id", "instance type")):
+        return True
+    # Dashboard / cloud platform content (Workers, settings pages)
+    if any(k in text for k in ("workers 日志", "workers 跟踪", "workers 日",
+                                 "可观察性", "仪表板", "定义环境变量", "runtime variables",
+                                 "observability", "configure api tokens")):
+        return True
+    # Very short or just numbers/symbols (Chinese chars are denser, use 8)
+    if len(text) < 8:
+        return True
+    # Looks like raw output: no spaces AND no CJK characters (pure ASCII/technical)
+    has_cjk = bool(re.search(r"[一-鿿]", text))
+    if " " not in text and not has_cjk:
+        return True
+    # Dashboard / web page content: long + structured labels + no conversational markers
+    # Real user decisions are short, conversational, contain action verbs
+    if len(text) > 120:
+        # Count conversational signals (I want, let's, do, should, prefer, etc.)
+        convo_words = ["i ", "let's", "we ", "you ", "do ", "should", "can ",
+                       "want", "need", "help", "用", "我", "你", "帮", "做"]
+        has_convo = any(w in text for w in convo_words)
+        # Count structural indicators (labels, colons, bullets)
+        struct_lines = text.count("\n")
+        has_structure = struct_lines >= 3 and ("：" in text or ":" in text)
+        if has_structure and not has_convo:
+            return True
+    return False
+
+
+def _is_credential_content(text):
+    """Block API keys, tokens, passwords, secrets from being stored as memories."""
+    lower = text.lower()
+    # Keyword-based detection
+    secret_keywords = [
+        "api_key", "api-key", "apikey", "api key",
+        "token", "secret", "password", "passwd", "pwd",
+        "credential", "auth_token", "access_key",
+        "private_key", "ssh_key", "ssh key",
+    ]
+    for kw in secret_keywords:
+        if kw in lower:
+            # Double-check: only block if there's also a long alphanumeric string nearby
+            if re.search(r"[A-Za-z0-9_\-]{20,}", text):
+                return True
+    # Pattern: long hex/base64-looking strings (≥32 chars) that look like keys
+    if re.search(r"\b[A-Fa-f0-9]{32,}\b", text):
+        return True
+    # Pattern: strings starting with common key prefixes
+    if re.search(r"\b(AKIA[A-Z0-9]{16}|sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{36})", text):
+        return True
+    return False
+
+
+def extract_memories(transcript_data, changed_files, outcome, domain):
+    """Extract key memories from a session for cross-session recall.
+
+    Returns list of {category, content, domain, confidence}.
+    Max 5 memories per session.
+    """
+    if not transcript_data:
+        return []
+
+    memories = []
+
+    # 1. Decisions — from user messages mentioning choices/preferences
+    #    Only keep real user intent, filter out system/console noise and credentials
+    user_msgs = transcript_data.get("user_messages", [])
+    decision_keywords = ["用", "选择", "决定", "偏好", "不要", "别用",
+                         "prefer", "use", "choose", "don't", "avoid"]
+    for msg in user_msgs:
+        if _is_noise_message(msg):
+            continue
+        if _is_credential_content(msg):
+            continue
+        text = msg.lower()
+        for kw in decision_keywords:
+            if kw in text and len(msg) > 15:
+                memories.append({
+                    "category": "decision",
+                    "content": msg[:200],
+                    "domain": domain,
+                    "confidence": 0.7,
+                })
+                break
+        if len(memories) >= 2:
+            break
+
+    # 2. Lessons — from errors that were fixed
+    errors = transcript_data.get("errors_encountered", [])
+    if errors and outcome == "success":
+        for err in errors[:2]:
+            err_text = err if isinstance(err, str) else str(err)
+            # Skip noise errors and credential content
+            if len(err_text) > 30 and not _is_noise_message(err_text) and not _is_credential_content(err_text):
+                memories.append({
+                    "category": "lesson",
+                    "content": f"Error encountered and resolved: {err_text[:200]}",
+                    "domain": domain,
+                    "confidence": 0.8,
+                })
+        if len(memories) >= 4:
+            pass  # already have enough
+
+    # 3. Context — session summary as context memory
+    file_count = len(changed_files)
+    if file_count >= 3:
+        basenames = [os.path.basename(f) for f in changed_files[:5]]
+        memories.append({
+            "category": "context",
+            "content": f"Session modified {file_count} files: {', '.join(basenames)}",
+            "domain": domain,
+            "confidence": 0.6,
+        })
+
+    # Deduplicate by content prefix
+    seen = set()
+    unique = []
+    for m in memories:
+        key = m["content"][:40]
+        if key not in seen:
+            seen.add(key)
+            unique.append(m)
+
+    return unique[:5]
+
+
 def main():
     # Read stdin — Claude Code passes JSON
     try:
@@ -486,6 +628,47 @@ def main():
             f"{skills_saved} skills extracted)"
         )
         print(msg, file=sys.stderr)
+
+    # ── Extract memories for cross-session recall ──
+    memories = extract_memories(transcript_data, changed_files, outcome, domain)
+    memories_saved = 0
+    for mem in memories:
+        mem_result = api("POST", "/memories/", {
+            "session_id": session_id,
+            "category": mem["category"],
+            "content": mem["content"],
+            "domain": mem["domain"],
+            "confidence": mem["confidence"],
+        })
+        if mem_result.get("ok"):
+            memories_saved += 1
+
+    if memories_saved:
+        print(f"[evo] {memories_saved} memories saved", file=sys.stderr)
+
+    # Log prompt outcome for auto-tuning
+    prompt_type = domain  # use domain as prompt_type
+    strategy = ""
+    if transcript_data:
+        # Infer strategy from tool usage
+        tool_counts = transcript_data.get("tool_counts", {})
+        if tool_counts.get("Bash", 0) > 5:
+            strategy = "bash_heavy"
+        elif tool_counts.get("Edit", 0) > 3:
+            strategy = "iterative_edit"
+        elif tool_counts.get("Write", 0) > 2:
+            strategy = "new_files"
+        else:
+            strategy = "mixed"
+
+    api("POST", "/prompts/log", {
+        "session_id": session_id,
+        "prompt_type": prompt_type,
+        "prompt_text": goal[:200] if goal else "",
+        "strategy": strategy,
+        "outcome": outcome,
+        "duration_sec": 0,
+    })
 
 
 if __name__ == "__main__":

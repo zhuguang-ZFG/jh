@@ -17,6 +17,10 @@ from .api_lima import router as lima_router
 from .api_quality import router as quality_router
 from .api_context import router as context_router
 from .api_failures import router as learn_router
+from .api_briefing import router as briefing_router
+from .api_prompts import router as prompts_router
+from .api_shared import router as shared_router
+from .api_memories import router as memories_router
 
 logger = logging.getLogger("evo")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -24,7 +28,19 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    get_conn()  # init DB on startup
+    conn = get_conn()  # init DB on startup (loads sqlite-vec)
+
+    # Rebuild vector embeddings on startup (background, non-blocking)
+    def _init_embeddings():
+        try:
+            from .vec_sync import rebuild_all_embeddings
+            rebuild_all_embeddings(conn)
+        except Exception as e:
+            logger.warning(f"Embedding rebuild skipped: {e}")
+
+    import threading
+    threading.Thread(target=_init_embeddings, daemon=True).start()
+
     _start_scheduler()
     yield
     _stop_scheduler()
@@ -69,8 +85,14 @@ def _start_scheduler():
             id="github_learning",
         )
 
+        # Weekly quality report: Monday 04:30 UTC (12:30 CST)
+        _scheduler.add_job(
+            _run_quality_report_job, "cron", day_of_week="mon", hour=4, minute=30,
+            id="weekly_quality_report",
+        )
+
         _scheduler.start()
-        logger.info("APScheduler started (weekly_evolution + daily_maintenance)")
+        logger.info("APScheduler started (weekly_evolution + daily_maintenance + quality_report)")
     except ImportError:
         logger.warning("APScheduler not installed, cron jobs disabled")
     except Exception as e:
@@ -87,27 +109,36 @@ def _run_weekly_job():
     from .telegram_bot import send_notification
     import asyncio
 
-    result = asyncio.run(run_weekly_evolution())
-    if result["proposal_ids"]:
-        msg = (
-            f"📊 *Weekly Evolution Report*\n"
-            f"Sessions analyzed: {result['sessions_analyzed']}\n"
-            f"Pass rate: {result['pass_rate']:.0%}\n"
-            f"Proposals: {len(result['proposal_ids'])}\n"
-            f"Top domains: {', '.join(d[0] for d in result['top_domains'][:3])}\n\n"
-            f"Use /evo to review proposals."
-        )
-    else:
-        msg = (
-            f"📊 *Weekly Evolution Report*\n"
-            f"Sessions analyzed: {result['sessions_analyzed']}\n"
-            f"Not enough evidence for proposals. Keep coding!"
-        )
+    async def _do():
+        result = await run_weekly_evolution()
+        if result["proposal_ids"]:
+            msg = (
+                f"📊 *Weekly Evolution Report*\n"
+                f"Sessions analyzed: {result['sessions_analyzed']}\n"
+                f"Pass rate: {result['pass_rate']:.0%}\n"
+                f"Proposals: {len(result['proposal_ids'])}\n"
+                f"Top domains: {', '.join(d[0] for d in result['top_domains'][:3])}\n\n"
+                f"Use /evo to review proposals."
+            )
+        else:
+            msg = (
+                f"📊 *Weekly Evolution Report*\n"
+                f"Sessions analyzed: {result['sessions_analyzed']}\n"
+                f"Not enough evidence for proposals. Keep coding!"
+            )
+        try:
+            await send_notification(msg)
+        except Exception:
+            pass
+
     try:
         loop = asyncio.get_event_loop()
-        loop.create_task(send_notification(msg))
-    except Exception:
-        pass
+        if loop.is_running():
+            loop.create_task(_do())
+        else:
+            loop.run_until_complete(_do())
+    except RuntimeError:
+        asyncio.run(_do())
 
 
 def _run_daily_job():
@@ -166,16 +197,52 @@ def _run_learning_job():
     import subprocess
     import sys
     try:
+        env = {
+            **os.environ,
+            "EVO_SERVER": "http://127.0.0.1:8090",
+            "GITHUB_TOKEN": config.GITHUB_TOKEN or os.getenv("GITHUB_TOKEN", ""),
+        }
         result = subprocess.run(
             [sys.executable, "/opt/evo-server/learning/github_learner.py"],
             capture_output=True, text=True, timeout=300,
-            env={**os.environ, "EVO_SERVER": "http://127.0.0.1:8090"},
+            env=env,
         )
         logger.info(f"GitHub learning: {result.stdout[-200:] if result.stdout else 'no output'}")
         if result.returncode != 0:
             logger.error(f"GitHub learning failed: {result.stderr[-200:]}")
     except Exception as e:
         logger.error(f"GitHub learning job error: {e}")
+
+
+def _run_quality_report_job():
+    """Weekly quality report — aggregate quality snapshots."""
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(_async_quality_report())
+        else:
+            loop.run_until_complete(_async_quality_report())
+    except RuntimeError:
+        asyncio.run(_async_quality_report())
+
+
+async def _async_quality_report():
+    from .evolution_engine import run_weekly_quality_report
+    from .telegram_bot import send_notification
+    try:
+        result = await run_weekly_quality_report()
+        if result.get("status") == "created":
+            msg = (
+                f"📊 *Weekly Quality Report*\n"
+                f"Week: {result['week']}\n"
+                f"Sessions: {result['sessions']}\n"
+                f"Success rate: {result['success_rate']:.0%}\n"
+                f"Avg score: {result['avg_score']:.0f}"
+            )
+            await send_notification(msg)
+    except Exception as e:
+        logger.error(f"Quality report failed: {e}")
 
 
 app = FastAPI(title="Evo-Server", version="0.1.0", lifespan=lifespan)
@@ -232,6 +299,10 @@ app.include_router(lima_router)
 app.include_router(quality_router)
 app.include_router(context_router)
 app.include_router(learn_router)
+app.include_router(briefing_router)
+app.include_router(prompts_router)
+app.include_router(shared_router)
+app.include_router(memories_router)
 
 
 # --- Health ---
@@ -245,6 +316,13 @@ def health():
         "evolutions": conn.execute("SELECT COUNT(*) c FROM evolutions WHERE status='proposed'").fetchone()["c"],
         "events": conn.execute("SELECT COUNT(*) c FROM events").fetchone()["c"],
     }
+    # Vec embedding counts
+    for vec_table in ["skills_vec", "patterns_vec", "failures_vec", "memories_vec"]:
+        try:
+            count = conn.execute(f"SELECT COUNT(*) c FROM {vec_table}").fetchone()["c"]
+            stats[vec_table] = count
+        except Exception:
+            stats[vec_table] = "unavailable"
     return {"ok": True, "uptime": time.time(), "stats": stats}
 
 

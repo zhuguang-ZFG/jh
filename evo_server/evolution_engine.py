@@ -292,6 +292,8 @@ def apply_evolution(evo_id: int) -> str:
                    VALUES (?, ?, ?, ?, 1.0, ?, 'evolved')""",
                 (skill_key, summary[:80], domain, summary, now),
             )
+            row_id = conn.execute("SELECT id FROM skills WHERE skill_key=?", (skill_key,)).fetchone()["id"]
+            _sync_vec(conn, "skills", row_id, {"name": summary[:80], "domain": domain, "pattern": summary})
             action = f"Created skill from evolution #{evo_id}"
         except Exception:
             action = f"Skill already exists for evolution #{evo_id}"
@@ -306,6 +308,8 @@ def apply_evolution(evo_id: int) -> str:
                    VALUES (?, ?, ?, ?, 0.6, ?)""",
                 (pattern_key, summary[:80], domain, summary, now),
             )
+            row_id = conn.execute("SELECT id FROM patterns WHERE pattern_key=?", (pattern_key,)).fetchone()["id"]
+            _sync_vec(conn, "patterns", row_id, {"name": summary[:80], "domain": domain, "description": summary})
             action = f"Created pattern from evolution #{evo_id}"
         except Exception:
             action = f"Pattern already exists for evolution #{evo_id}"
@@ -333,6 +337,14 @@ def apply_evolution(evo_id: int) -> str:
     )
     conn.commit()
     return action
+
+
+def _sync_vec(conn, table, row_id, row_data):
+    try:
+        from .vec_sync import sync_row_embedding
+        sync_row_embedding(conn, table, row_id, row_data)
+    except Exception:
+        pass
 
 
 def _infer_domain_from_summary(summary: str) -> str:
@@ -477,3 +489,13 @@ def _maybe_promote_lesson(conn, lesson_text: str, now: float) -> bool:
         (skill_key, lesson[:60], domain, lesson, now, now),
     )
     return True
+
+
+# ── Weekly quality report ──────────────────────────────────────
+
+async def run_weekly_quality_report() -> dict:
+    """Generate weekly quality report from quality_snapshots."""
+    from .quality_trends import run_weekly_quality_report as _run
+    result = _run()
+    logger.info(f"Quality report: {result}")
+    return result

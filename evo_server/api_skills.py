@@ -4,8 +4,19 @@ from fastapi import APIRouter, Body
 from .db import get_conn
 from .models import SkillRecall, SkillUpdate, ApiResponse
 from . import config
+from .vec_search import vec_search
 
 router = APIRouter(prefix="/skills", tags=["skills"])
+
+
+def _sync_skill_embedding(conn, row_id, name, domain, pattern):
+    try:
+        from .vec_sync import sync_row_embedding
+        sync_row_embedding(conn, "skills", row_id, {
+            "name": name, "domain": domain, "pattern": pattern,
+        })
+    except Exception:
+        pass  # non-critical
 
 
 @router.post("/")
@@ -27,11 +38,15 @@ def create_skill(
                VALUES (?, ?, ?, ?, ?, 0, 0, ?, 0, ?)""",
             (key, name, domain, pattern, weight, now, source),
         )
+        row_id = conn.execute("SELECT id FROM skills WHERE skill_key=?", (key,)).fetchone()["id"]
+        _sync_skill_embedding(conn, row_id, name, domain, pattern)
     except conn.IntegrityError:
         conn.execute(
             "UPDATE skills SET pattern=?, weight=MAX(weight,?), last_used=? WHERE skill_key=?",
             (pattern, weight, now, key),
         )
+        row_id = conn.execute("SELECT id FROM skills WHERE skill_key=?", (key,)).fetchone()["id"]
+        _sync_skill_embedding(conn, row_id, name, domain, pattern)
     conn.commit()
     return ApiResponse(ok=True, data={"skill_key": key})
 
@@ -54,6 +69,13 @@ def list_skills(domain: str = "", limit: int = 50):
 @router.post("/recall")
 def recall_skills(q: SkillRecall):
     conn = get_conn()
+    # If scenario has text, use vector search
+    if q.scenario:
+        results = vec_search(conn, "skills", q.scenario, limit=q.limit,
+                             min_weight=0.1, domain=q.domain or "")
+        return ApiResponse(ok=True, data=[{k: v for k, v in r.items() if k != "_score"} for r in results])
+
+    # Fallback: top by weight
     if q.domain:
         rows = conn.execute(
             """SELECT * FROM skills

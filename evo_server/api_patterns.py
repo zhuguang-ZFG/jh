@@ -8,6 +8,16 @@ from .models import PatternLearn, ApiResponse
 router = APIRouter(prefix="/patterns", tags=["patterns"])
 
 
+def _sync_pattern_embedding(conn, row_id, name, domain, description):
+    try:
+        from .vec_sync import sync_row_embedding
+        sync_row_embedding(conn, "patterns", row_id, {
+            "name": name, "domain": domain, "description": description,
+        })
+    except Exception:
+        pass
+
+
 @router.get("/")
 def list_patterns(domain: str = "", limit: int = 50):
     conn = get_conn()
@@ -36,6 +46,8 @@ def learn_pattern(p: PatternLearn):
             (pattern_key, p.name, p.domain, p.description,
              p.code_example, p.source_repo, p.confidence, now),
         )
+        row_id = conn.execute("SELECT id FROM patterns WHERE pattern_key=?", (pattern_key,)).fetchone()["id"]
+        _sync_pattern_embedding(conn, row_id, p.name, p.domain, p.description)
         conn.commit()
         return ApiResponse(ok=True, message=f"Learned pattern: {p.name}", data={"pattern_key": pattern_key})
     except conn.IntegrityError:
@@ -43,5 +55,7 @@ def learn_pattern(p: PatternLearn):
             "UPDATE patterns SET description=?, confidence=MAX(confidence, ?), last_used=? WHERE pattern_key=?",
             (p.description, p.confidence, now, pattern_key),
         )
+        row_id = conn.execute("SELECT id FROM patterns WHERE pattern_key=?", (pattern_key,)).fetchone()["id"]
+        _sync_pattern_embedding(conn, row_id, p.name, p.domain, p.description)
         conn.commit()
         return ApiResponse(ok=True, message=f"Updated pattern: {p.name}", data={"pattern_key": pattern_key})

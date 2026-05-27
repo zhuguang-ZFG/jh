@@ -56,6 +56,16 @@ def load_snapshot(session_id, phase):
     return None
 
 
+def normalize_path(fp):
+    """Normalize file path for the current OS (handle /tmp/ on Windows, etc.)."""
+    if not fp:
+        return fp
+    # Convert /tmp/ to Windows temp dir on Windows
+    if os.name == "nt" and fp.startswith("/tmp/"):
+        fp = os.path.join(tempfile.gettempdir(), fp[5:])
+    return os.path.normpath(fp)
+
+
 def get_changed_file():
     """Get the file being written/edited from stdin JSON."""
     try:
@@ -70,7 +80,7 @@ def get_changed_file():
         or data.get("input", {}).get("file_path")
         or data.get("command", "").split('"')[1] if '"' in data.get("command", "") else None
     )
-    return file_path, data
+    return normalize_path(file_path), data
 
 
 def handle_pre_tool_use():

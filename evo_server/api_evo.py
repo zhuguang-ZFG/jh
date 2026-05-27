@@ -53,6 +53,14 @@ def approve_evolution(evo_id: int, a: EvoApprove):
     return ApiResponse(ok=True, message=f"Evolution {new_status}")
 
 
+@router.post("/{evo_id}/apply")
+def apply_evolution_endpoint(evo_id: int):
+    """Apply an approved evolution — creates skills/patterns/rules."""
+    from .evolution_engine import apply_evolution
+    result = apply_evolution(evo_id)
+    return ApiResponse(ok=True, message=result)
+
+
 @router.post("/create")
 def create_evolution(category: str, summary: str, evidence_ids: List[str] = [], confidence: float = 0.0):
     """Create a new evolution proposal (called by evolution engine)."""

@@ -5,8 +5,20 @@ from typing import Optional
 from fastapi import APIRouter, Body
 from .db import get_conn
 from .models import ApiResponse
+from .vec_search import vec_search
 
 router = APIRouter(prefix="/learn", tags=["learning"])
+
+
+def _sync_failure_embedding(conn, row_id, error_type, description, fix_suggestion, domain):
+    try:
+        from .vec_sync import sync_row_embedding
+        sync_row_embedding(conn, "failure_patterns", row_id, {
+            "error_type": error_type, "description": description,
+            "fix_suggestion": fix_suggestion, "domain": domain,
+        })
+    except Exception:
+        pass
 
 
 # ── Failure patterns ────────────────────────────────────────────
@@ -30,6 +42,8 @@ def record_failure(
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (key, domain, error_type, description, file_context, fix_suggestion, now, now),
         )
+        row_id = conn.execute("SELECT id FROM failure_patterns WHERE pattern_key=?", (key,)).fetchone()["id"]
+        _sync_failure_embedding(conn, row_id, error_type, description, fix_suggestion, domain)
     except conn.IntegrityError:
         conn.execute(
             """UPDATE failure_patterns SET occurrences=occurrences+1, last_seen=?,
@@ -37,6 +51,8 @@ def record_failure(
                WHERE pattern_key=?""",
             (now, description, description, key),
         )
+        row_id = conn.execute("SELECT id FROM failure_patterns WHERE pattern_key=?", (key,)).fetchone()["id"]
+        _sync_failure_embedding(conn, row_id, error_type, description, fix_suggestion, domain)
     conn.commit()
     return ApiResponse(ok=True, data={"pattern_key": key})
 
@@ -67,26 +83,37 @@ def relevant_failures(
     context: str = Body(""),
     limit: int = Body(5),
 ):
-    """Get failure patterns relevant to a context string (keyword match)."""
+    """Get failure patterns relevant to a context string (vector search)."""
     conn = get_conn()
     if not context:
         rows = conn.execute(
             "SELECT * FROM failure_patterns ORDER BY occurrences DESC LIMIT ?", (limit,)
         ).fetchall()
-    else:
-        keywords = [w for w in context.lower().split() if len(w) >= 3][:5]
-        if not keywords:
-            rows = conn.execute(
-                "SELECT * FROM failure_patterns ORDER BY occurrences DESC LIMIT ?", (limit,)
-            ).fetchall()
-        else:
-            like_clauses = " OR ".join(["description LIKE ?" for _ in keywords])
-            like_params = ["%{}%".format(k) for k in keywords]
-            rows = conn.execute(
-                "SELECT * FROM failure_patterns WHERE ({}) ORDER BY occurrences DESC LIMIT ?".format(like_clauses),
-                like_params + [limit],
-            ).fetchall()
-    return ApiResponse(ok=True, data=[dict(r) for r in rows])
+        return ApiResponse(ok=True, data=[dict(r) for r in rows])
+
+    results = vec_search(conn, "failure_patterns", context, limit=limit)
+    # Remove _score from output
+    return ApiResponse(ok=True, data=[{k: v for k, v in r.items() if k != "_score"} for r in results])
+
+
+@router.get("/failures/stats")
+def failure_stats():
+    """Get failure statistics by type and domain."""
+    conn = get_conn()
+    by_type = conn.execute(
+        "SELECT error_type, COUNT(*) as count, SUM(occurrences) as total_occurrences "
+        "FROM failure_patterns GROUP BY error_type ORDER BY total_occurrences DESC"
+    ).fetchall()
+    by_domain = conn.execute(
+        "SELECT domain, COUNT(*) as count, SUM(occurrences) as total_occurrences "
+        "FROM failure_patterns GROUP BY domain ORDER BY total_occurrences DESC"
+    ).fetchall()
+    total = conn.execute("SELECT COUNT(*) c FROM failure_patterns").fetchone()["c"]
+    return ApiResponse(ok=True, data={
+        "total": total,
+        "by_type": [dict(r) for r in by_type],
+        "by_domain": [dict(r) for r in by_domain],
+    })
 
 
 # ── Conventions ─────────────────────────────────────────────────
