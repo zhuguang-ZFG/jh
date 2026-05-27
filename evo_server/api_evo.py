@@ -1,6 +1,7 @@
 """Evolution proposals endpoint."""
 import json
 import time
+from typing import List
 from fastapi import APIRouter
 from .db import get_conn
 from .models import EvoApprove, ApiResponse
@@ -52,7 +53,7 @@ def approve_evolution(evo_id: int, a: EvoApprove):
 
 
 @router.post("/create")
-def create_evolution(category: str, summary: str, evidence_ids: list[str] = [], confidence: float = 0.0):
+def create_evolution(category: str, summary: str, evidence_ids: List[str] = [], confidence: float = 0.0):
     """Create a new evolution proposal (called by evolution engine)."""
     conn = get_conn()
     import uuid

@@ -3,11 +3,12 @@ import httpx
 import json
 import time
 import logging
+from typing import Optional, List
 from . import config
 
 logger = logging.getLogger("evo.telegram")
 
-_client: httpx.AsyncClient | None = None
+_client = None  # type: Optional[httpx.AsyncClient]
 
 
 async def get_client() -> httpx.AsyncClient:
@@ -17,7 +18,8 @@ async def get_client() -> httpx.AsyncClient:
     return _client
 
 
-async def send_message(chat_id: int, text: str, reply_to: int | None = None) -> dict:
+async def send_message(chat_id, text, reply_to=None):
+    # type: (int, str, Optional[int]) -> dict
     client = await get_client()
     payload = {
         "chat_id": chat_id,
@@ -49,7 +51,8 @@ async def send_voice(chat_id: int, audio_bytes: bytes, caption: str = "") -> dic
     return r.json()
 
 
-async def send_inline_keyboard(chat_id: int, text: str, buttons: list[list[dict]]) -> dict:
+async def send_inline_keyboard(chat_id, text, buttons):
+    # type: (int, str, List[List[dict]]) -> dict
     """Send message with inline keyboard. buttons = [[{text, data}, ...], ...]"""
     client = await get_client()
     keyboard = {"inline_keyboard": buttons}

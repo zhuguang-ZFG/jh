@@ -76,7 +76,7 @@ def _run_weekly_job():
     from .telegram_bot import send_notification
     import asyncio
 
-    result = run_weekly_evolution()
+    result = asyncio.run(run_weekly_evolution())
     if result["proposal_ids"]:
         msg = (
             f"📊 *Weekly Evolution Report*\n"

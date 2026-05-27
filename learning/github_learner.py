@@ -7,7 +7,11 @@ import subprocess
 import tempfile
 import urllib.request
 import urllib.parse
+import base64
 from pathlib import Path
+from typing import List, Dict, Optional
+
+from pattern_extractor import extract_patterns
 
 # Config
 EVO_SERVER = os.getenv("EVO_SERVER", "http://119.45.204.198")
@@ -27,7 +31,7 @@ def github_api(path: str) -> dict:
         return json.loads(resp.read())
 
 
-def search_trending(language: str, since: str = "daily") -> list[dict]:
+def search_trending(language: str, since: str = "daily") -> List[Dict]:
     """Search GitHub for trending repos by language and recent activity."""
     # Use GitHub search API: repos created/updated recently with high stars
     query = f"language:{language} created:>{_days_ago(7)} stars:>50"
@@ -45,20 +49,35 @@ def _days_ago(n: int) -> str:
     return (datetime.now() - timedelta(days=n)).strftime("%Y-%m-%d")
 
 
-def clone_repo(repo_url: str, target_dir: str) -> Path | None:
-    """Shallow clone a repo."""
+def get_repo_files(repo_name: str, language: str) -> List[Dict]:
+    """Get file list from GitHub API without cloning."""
+    extensions = {
+        "python": ".py", "rust": ".rs", "go": ".go",
+        "typescript": ".ts", "javascript": ".js", "tsx": ".tsx",
+    }
+    ext = extensions.get(language, ".py")
     try:
-        subprocess.run(
-            ["git", "clone", "--depth=1", "--single-branch", repo_url, target_dir],
-            capture_output=True, timeout=30, check=True,
-        )
-        return Path(target_dir)
+        # Search for files in the repo
+        result = github_api(f"/search/code?q=repo:{repo_name}+extension:{ext}&per_page=5")
+        return result.get("items", [])[:5]
     except Exception as e:
-        print(f"[learner] Clone failed {repo_url}: {e}")
-        return None
+        print(f"[learner] File search failed for {repo_name}: {e}")
+        return []
 
 
-def scan_repo(repo_path: Path, language: str) -> list[dict]:
+def get_file_content(repo_name: str, file_path: str) -> Optional[str]:
+    """Get file content from GitHub API."""
+    try:
+        result = github_api(f"/repos/{repo_name}/contents/{file_path}")
+        import base64
+        if "content" in result:
+            return base64.b64decode(result["content"]).decode("utf-8", errors="ignore")
+    except Exception as e:
+        print(f"[learner] File fetch failed {repo_name}/{file_path}: {e}")
+    return None
+
+
+def scan_repo(repo_path: Path, language: str) -> List[Dict]:
     """Scan repo for code patterns."""
     from pattern_extractor import extract_patterns
     extensions = {
@@ -81,7 +100,7 @@ def scan_repo(repo_path: Path, language: str) -> list[dict]:
     return patterns
 
 
-def post_patterns(patterns: list[dict], source_repo: str):
+def post_patterns(patterns: List[Dict], source_repo: str):
     """Post patterns to evo-server API."""
     for p in patterns:
         try:
@@ -117,18 +136,26 @@ def main():
 
         for repo in repos:
             name = repo["full_name"]
-            url = repo["clone_url"]
             print(f"[learner] Scanning {name}...")
 
-            with tempfile.TemporaryDirectory() as tmpdir:
-                path = clone_repo(url, tmpdir)
-                if not path:
-                    continue
-                patterns = scan_repo(path, lang)
-                if patterns:
-                    post_patterns(patterns, f"https://github.com/{name}")
-                    total_patterns += len(patterns)
-                    print(f"[learner] Extracted {len(patterns)} patterns from {name}")
+            # Get files via API instead of cloning
+            files = get_repo_files(name, lang)
+            if not files:
+                print(f"[learner] No {lang} files found in {name}")
+                continue
+
+            patterns = []
+            for file_info in files[:3]:  # Limit to 3 files per repo
+                file_path = file_info.get("path", "")
+                content = get_file_content(name, file_path)
+                if content:
+                    file_patterns = extract_patterns(content, lang, file_path)
+                    patterns.extend(file_patterns)
+
+            if patterns:
+                post_patterns(patterns, f"https://github.com/{name}")
+                total_patterns += len(patterns)
+                print(f"[learner] Extracted {len(patterns)} patterns from {name}")
 
     print(f"\n[learner] Done. Total patterns learned: {total_patterns}")
 

@@ -4,10 +4,71 @@ import time
 import hashlib
 import logging
 from collections import Counter
+from typing import List, Dict
 from .db import get_conn
 from . import config
 
 logger = logging.getLogger("evo.evolution")
+
+
+# ── LiMa-powered analysis ─────────────────────────────────────────
+
+async def analyze_with_lima(analysis: dict) -> dict:
+    """Use LiMa to intelligently analyze sessions and generate proposals."""
+    from .lima_bridge import chat_with_lima
+
+    if analysis["total"] < 2:
+        return {"proposals": [], "raw_analysis": "Not enough sessions for LiMa analysis"}
+
+    # Build context from sessions
+    sessions_text = []
+    for s in analysis["sessions"][:10]:
+        sessions_text.append(
+            f"- Session {s['session_id']}: tool={s['tool']}, outcome={s['outcome']}, "
+            f"files={s['changed_files'][:200]}, lessons={s['lessons'][:100]}"
+        )
+
+    prompt = f"""Analyze these coding sessions and suggest improvements.
+
+Sessions ({analysis['total']} total, {analysis['pass_rate']:.0%} success rate):
+{chr(10).join(sessions_text)}
+
+Top domains: {analysis['top_domains'][:3]}
+Lessons collected: {len(analysis['lessons'])}
+
+Return JSON array of proposals. Each proposal:
+{{"category": "skill|pattern|strategy", "summary": "clear actionable suggestion", "confidence": 0.0-1.0}}
+
+Focus on:
+1. Patterns in failures — what keeps going wrong?
+2. Success patterns — what's working that should be formalized?
+3. Missing skills — what domains lack coverage?
+
+Return ONLY the JSON array, no explanation."""
+
+    response = await chat_with_lima(
+        prompt,
+        system="You are a programming evolution engine. Analyze coding sessions and suggest concrete improvements. Return only valid JSON."
+    )
+
+    # Strip markdown code blocks if present
+    clean = response.strip()
+    if clean.startswith("```"):
+        clean = clean.split("\n", 1)[1] if "\n" in clean else clean[3:]
+        if clean.endswith("```"):
+            clean = clean[:-3]
+        clean = clean.strip()
+
+    try:
+        proposals = json.loads(clean)
+        if isinstance(proposals, list):
+            for p in proposals:
+                p["evidence_ids"] = analysis["evidence_ids"]
+            return {"proposals": proposals, "raw_analysis": response}
+    except json.JSONDecodeError:
+        pass
+
+    return {"proposals": [], "raw_analysis": response}
 
 
 # ── Session analysis ──────────────────────────────────────────────
@@ -81,7 +142,8 @@ def analyze_recent_sessions(days: int = 7) -> dict:
 
 # ── Proposal generation ───────────────────────────────────────────
 
-def generate_proposals(analysis: dict) -> list[dict]:
+def generate_proposals(analysis):
+    # type: (dict) -> List[Dict]
     """Generate evolution proposals based on session analysis."""
     proposals = []
     if analysis["total"] < config.EVIDENCE_MIN:
@@ -146,7 +208,8 @@ def generate_proposals(analysis: dict) -> list[dict]:
 
 # ── Proposal persistence ──────────────────────────────────────────
 
-def save_proposals(proposals: list[dict]) -> list[int]:
+def save_proposals(proposals):
+    # type: (List[Dict]) -> List[int]
     """Save proposals to DB. Returns list of created evo IDs."""
     conn = get_conn()
     ids = []
@@ -258,13 +321,23 @@ def _infer_domain_from_summary(summary: str) -> str:
 
 # ── Weekly evolution run ──────────────────────────────────────────
 
-def run_weekly_evolution() -> dict:
-    """Full weekly evolution cycle: analyze → propose → notify."""
+async def run_weekly_evolution() -> dict:
+    """Full weekly evolution cycle: analyze → LiMa proposes → notify."""
+    import asyncio
+
     logger.info("Starting weekly evolution cycle")
     analysis = analyze_recent_sessions(days=7)
     logger.info(f"Analyzed {analysis['total']} sessions")
 
-    proposals = generate_proposals(analysis)
+    # Try LiMa-powered analysis first
+    lima_result = await analyze_with_lima(analysis)
+    proposals = lima_result["proposals"]
+
+    # Fallback to rule-based if LiMa returns nothing
+    if not proposals:
+        logger.info("LiMa returned no proposals, falling back to rule-based")
+        proposals = generate_proposals(analysis)
+
     logger.info(f"Generated {len(proposals)} proposals")
 
     saved_ids = save_proposals(proposals)
@@ -276,6 +349,7 @@ def run_weekly_evolution() -> dict:
         "proposal_ids": saved_ids,
         "pass_rate": analysis.get("pass_rate", 0),
         "top_domains": analysis.get("top_domains", []),
+        "source": "liMa" if lima_result["proposals"] else "rule_based",
     }
 
 

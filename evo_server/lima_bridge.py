@@ -1,26 +1,25 @@
 """LiMa cross-server knowledge bridge.
 
 Bidirectional knowledge sync between evo-server (119.45.204.198)
-and LiMa server (47.112.162.80 / chat.donglicao.com).
+and LiMa server (api.donglicao.com).
 
-LiMa MCP tools used:
-  - memory_stats: memory distribution by type
-  - outcome_ledger_stats: success/failure stats
-  - search_memory: keyword search over memories
-  - dev_search_docs: documentation search
+LiMa API: OpenAI-compatible chat completions + MCP tools.
 """
 import hashlib
 import time
 import json
 import logging
+from typing import List, Dict
 import httpx
 from .db import get_conn
 from . import config
 
 logger = logging.getLogger("evo.lima_bridge")
 
-LIMA_MCP_BASE = "https://chat.donglicao.com/mcp/tools/call"
-LIMA_API_KEY = "lima-local"
+# LiMa API (OpenAI-compatible)
+LIMA_API_BASE = "https://api.donglicao.com/v1"
+LIMA_API_KEY = "aAN61guXCiv859KM0c7424927f7448BbA48a3725E50f22Bd"
+LIMA_MODEL = "lima-1.3"
 
 # Knowledge type mapping: LiMa memory_type → evo-server target table
 # code_fact → skills (actionable knowledge)
@@ -35,15 +34,18 @@ LIMA_TYPE_MAP = {
 }
 
 
-async def call_mcp_tool(name: str, arguments: dict = None) -> dict:
-    """Call a LiMa MCP tool via HTTPS."""
-    if arguments is None:
-        arguments = {}
+async def chat_with_lima(message: str, system: str = "") -> str:
+    """Send a message to LiMa and get a response."""
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": message})
+
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=60) as client:
             r = await client.post(
-                LIMA_MCP_BASE,
-                json={"name": name, "arguments": arguments},
+                f"{LIMA_API_BASE}/chat/completions",
+                json={"model": LIMA_MODEL, "messages": messages, "temperature": 0.3},
                 headers={
                     "Authorization": f"Bearer {LIMA_API_KEY}",
                     "Content-Type": "application/json",
@@ -51,46 +53,62 @@ async def call_mcp_tool(name: str, arguments: dict = None) -> dict:
             )
             r.raise_for_status()
             data = r.json()
-            return data.get("result", data)
+            return data["choices"][0]["message"]["content"]
     except Exception as e:
-        logger.error(f"LiMa MCP call '{name}' failed: {e}")
-        return {"error": str(e)}
+        logger.error(f"LiMa chat failed: {e}")
+        return f"Error: {e}"
 
 
 # ── Stats fetch ──────────────────────────────────────────────
 
 async def fetch_lima_stats() -> dict:
-    """Fetch LiMa memory + outcome stats for sync metadata."""
-    mem_stats = await call_mcp_tool("memory_stats")
-    outcome_stats = await call_mcp_tool("outcome_ledger_stats")
+    """Fetch LiMa stats via chat API."""
+    response = await chat_with_lima(
+        "Return your current memory statistics as JSON. Include: total_memories, by_type (list of {type, count}), recent_count (last 24h).",
+        system="You are a knowledge management system. Return only valid JSON, no explanation."
+    )
+    try:
+        stats = json.loads(response)
+    except json.JSONDecodeError:
+        stats = {"raw": response, "total": 0}
     return {
-        "memory": mem_stats,
-        "outcome": outcome_stats,
+        "memory": stats,
+        "outcome": {"total": 0, "note": "outcome tracking via chat API"},
         "fetched_at": time.time(),
     }
 
 
 # ── Knowledge search ────────────────────────────────────────
 
-async def search_lima_knowledge(query: str, limit: int = 10) -> list[dict]:
-    """Search LiMa memories by keyword. Returns list of {id, summary, timestamp}."""
-    result = await call_mcp_tool("search_memory", {
-        "query": query,
-        "limit": limit,
-    })
-    if isinstance(result, dict) and "results" in result:
-        return result["results"]
-    return []
+async def search_lima_knowledge(query, limit=10):
+    # type: (str, int) -> List[Dict]
+    """Search LiMa knowledge by querying the LLM."""
+    response = await chat_with_lima(
+        f"Search your knowledge for: {query}\nReturn up to {limit} relevant items as a JSON array. Each item: {{id, summary, timestamp, source_type}}.",
+        system="You are a knowledge search engine. Return only valid JSON array, no explanation."
+    )
+    try:
+        results = json.loads(response)
+        if isinstance(results, list):
+            return results[:limit]
+    except json.JSONDecodeError:
+        pass
+    return [{"summary": response[:200], "source_type": "code_fact"}]
 
 
-async def search_lima_docs(query: str, limit: int = 5) -> list[dict]:
-    """Search documentation via LiMa dev_search_docs."""
-    result = await call_mcp_tool("dev_search_docs", {
-        "query": query,
-        "limit": limit,
-    })
-    if isinstance(result, dict) and "results" in result:
-        return result["results"]
+async def search_lima_docs(query, limit=5):
+    # type: (str, int) -> List[Dict]
+    """Search documentation knowledge."""
+    response = await chat_with_lima(
+        f"Find documentation about: {query}\nReturn up to {limit} items as JSON array. Each: {{title, snippet, url}}.",
+        system="Return only valid JSON array, no explanation."
+    )
+    try:
+        results = json.loads(response)
+        if isinstance(results, list):
+            return results[:limit]
+    except json.JSONDecodeError:
+        pass
     return []
 
 
@@ -178,7 +196,8 @@ def import_stats(stats: dict) -> dict:
     return {"imported": imported, "stats": stats}
 
 
-def import_knowledge_items(items: list[dict]) -> dict:
+def import_knowledge_items(items):
+    # type: (List[Dict]) -> dict
     """Import knowledge items from LiMa into evo-server skills/patterns.
 
     Each item: {id, summary, timestamp, source_type?}

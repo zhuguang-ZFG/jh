@@ -1,9 +1,10 @@
 """SQLite connection + schema migration (WAL mode)."""
 import sqlite3
 import os
+from typing import Optional
 from . import config
 
-_conn: sqlite3.Connection | None = None
+_conn = None  # type: Optional[sqlite3.Connection]
 
 SCHEMA_SQL = """
 -- L0: immutable rules

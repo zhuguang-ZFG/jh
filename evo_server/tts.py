@@ -1,6 +1,7 @@
 """MiMo TTS client — convert text to voice for Telegram."""
 import base64
 import logging
+from typing import Optional
 import httpx
 from . import config
 
@@ -10,7 +11,8 @@ API_BASE = "https://token-plan-cn.xiaomimimo.com"
 DEFAULT_MODEL = "mimo-v2.5-tts"
 
 
-async def tts(text: str, model: str = DEFAULT_MODEL) -> bytes | None:
+async def tts(text, model=DEFAULT_MODEL):
+    # type: (str, str) -> Optional[bytes]
     """Convert text to WAV audio bytes. Returns None on failure."""
     api_key = config.MIMO_API_KEY
     if not api_key:

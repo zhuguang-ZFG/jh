@@ -1,9 +1,10 @@
 """Pattern extraction from source code — language-aware AST-lite scanning."""
 import re
 import hashlib
+from typing import List, Dict
 
 
-def extract_patterns(content: str, language: str, filepath: str) -> list[dict]:
+def extract_patterns(content: str, language: str, filepath: str) -> List[Dict]:
     """Extract code patterns from source content."""
     patterns = []
     lines = content.split("\n")
@@ -20,7 +21,7 @@ def extract_patterns(content: str, language: str, filepath: str) -> list[dict]:
     return patterns
 
 
-def _extract_python_patterns(lines: list[str], filepath: str) -> list[dict]:
+def _extract_python_patterns(lines: List[str], filepath: str) -> List[Dict]:
     patterns = []
     domain = _infer_domain(filepath)
 
@@ -89,7 +90,7 @@ def _extract_python_patterns(lines: list[str], filepath: str) -> list[dict]:
     return patterns
 
 
-def _extract_js_patterns(lines: list[str], filepath: str) -> list[dict]:
+def _extract_js_patterns(lines: List[str], filepath: str) -> List[Dict]:
     patterns = []
     domain = _infer_domain(filepath)
 
@@ -120,7 +121,7 @@ def _extract_js_patterns(lines: list[str], filepath: str) -> list[dict]:
     return patterns
 
 
-def _extract_rust_patterns(lines: list[str], filepath: str) -> list[dict]:
+def _extract_rust_patterns(lines: List[str], filepath: str) -> List[Dict]:
     patterns = []
     domain = "rust"
 
@@ -150,7 +151,7 @@ def _extract_rust_patterns(lines: list[str], filepath: str) -> list[dict]:
     return patterns
 
 
-def _extract_go_patterns(lines: list[str], filepath: str) -> list[dict]:
+def _extract_go_patterns(lines: List[str], filepath: str) -> List[Dict]:
     patterns = []
     domain = "go"
 

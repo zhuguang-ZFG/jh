@@ -1,6 +1,6 @@
 """Pydantic models for API request/response."""
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 
 
 # --- Memory ---
@@ -24,7 +24,7 @@ class SessionLog(BaseModel):
     tool: str  # claude_code / codex
     goal: str
     outcome: str = ""  # success / failure / partial
-    changed_files: list[str] = []
+    changed_files: List[str] = []
     lessons: str = ""
     duration_sec: int = 0
 
@@ -61,4 +61,4 @@ class EvoApprove(BaseModel):
 class ApiResponse(BaseModel):
     ok: bool = True
     message: str = ""
-    data: Optional[dict | list] = None
+    data: Optional[dict] = None
