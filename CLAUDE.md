@@ -1,4 +1,20 @@
-# Project Coding Guidelines (Auto-generated)
+# Project Coding Guidelines
+
+## Session Startup — Mandatory
+
+Every new session MUST load cross-session memory from evo_server first:
+
+```bash
+python D:/jh/hooks/evo_hook_startup.py
+```
+
+This injects accumulated skills, patterns, failures, and memories from past sessions.
+Run this BEFORE answering the user's first substantive question.
+If the VPS is unreachable, continue without it (don't block the session).
+
+---
+
+## Auto-Generated Guidelines
 
 > Generated from 12 sessions, 50 skills, 25 patterns
 > Last updated: 2026-05-28 01:30
