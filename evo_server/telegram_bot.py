@@ -1,6 +1,7 @@
 """Telegram Bot — webhook-based, async httpx client, single-owner auth."""
 import httpx
 import json
+import os
 import time
 import logging
 from typing import Optional, List
@@ -9,6 +10,7 @@ from . import config
 logger = logging.getLogger("evo.telegram")
 
 _client = None  # type: Optional[httpx.AsyncClient]
+_preferred_backend = None  # type: Optional[str]  # user-selected LLM backend name
 
 
 async def get_client() -> httpx.AsyncClient:
@@ -20,20 +22,44 @@ async def get_client() -> httpx.AsyncClient:
 
 async def send_message(chat_id, text, reply_to=None):
     # type: (int, str, Optional[int]) -> dict
+    """Send message, auto-splitting if > 4000 chars."""
     client = await get_client()
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": True,
-    }
-    if reply_to:
-        payload["reply_to_message_id"] = reply_to
-    r = await client.post(
-        f"/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage",
-        json=payload,
-    )
-    return r.json()
+    # Telegram limit is 4096; split at 4000 to be safe
+    chunks = _split_message(text, 4000)
+    last_result = None
+    for chunk in chunks:
+        payload = {
+            "chat_id": chat_id,
+            "text": chunk,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True,
+        }
+        if reply_to and chunk == chunks[0]:
+            payload["reply_to_message_id"] = reply_to
+        r = await client.post(
+            f"/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage",
+            json=payload,
+        )
+        last_result = r.json()
+    return last_result or {}
+
+
+def _split_message(text, max_len=4000):
+    """Split long message into chunks at line boundaries."""
+    if len(text) <= max_len:
+        return [text]
+    chunks = []
+    while text:
+        if len(text) <= max_len:
+            chunks.append(text)
+            break
+        # Find last newline before max_len
+        cut = text.rfind("\n", 0, max_len)
+        if cut == 0:
+            cut = max_len
+        chunks.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+    return chunks
 
 
 async def send_voice(chat_id: int, audio_bytes: bytes, caption: str = "") -> dict:
@@ -91,8 +117,69 @@ def _auto_claim_owner(user_id: int):
         )
 
 
+def _apply_evolution(conn, evo: dict, now: float) -> str:
+    """Auto-apply an approved evolution. Returns description of what was done."""
+    category = evo.get("category", "")
+    summary = evo.get("summary", "")
+
+    if category == "skill":
+        # Promote lesson to skill
+        import hashlib
+        skill_key = hashlib.sha256(summary.encode()).hexdigest()[:16]
+        existing = conn.execute("SELECT id FROM skills WHERE skill_key=?", (skill_key,)).fetchone()
+        if not existing:
+            domain = "general"
+            lower = summary.lower()
+            if any(k in lower for k in ("python", "django", "flask", "fastapi")):
+                domain = "python"
+            elif any(k in lower for k in ("rust", "cargo")):
+                domain = "rust"
+            elif any(k in lower for k in ("go ", "golang")):
+                domain = "go"
+            elif any(k in lower for k in ("react", "typescript", "javascript")):
+                domain = "frontend"
+            conn.execute(
+                """INSERT INTO skills (skill_key, name, domain, pattern, weight,
+                                       use_count, success_count, created_at, last_used, source)
+                   VALUES (?, ?, ?, ?, 0.8, 1, 1, ?, ?, 'evo_approved')""",
+                (skill_key, summary[:60], domain, summary, now, now),
+            )
+            return f"Created skill: {summary[:50]}"
+        else:
+            conn.execute(
+                "UPDATE skills SET weight=MIN(weight+0.1, 1.0), last_used=? WHERE skill_key=?",
+                (now, skill_key),
+            )
+            return f"Boosted existing skill weight"
+
+    elif category == "pattern":
+        import hashlib
+        pattern_key = hashlib.sha256(summary.encode()).hexdigest()[:16]
+        existing = conn.execute("SELECT id FROM patterns WHERE pattern_key=?", (pattern_key,)).fetchone()
+        if not existing:
+            conn.execute(
+                """INSERT INTO patterns (pattern_key, name, domain, description,
+                                         confidence, created_at, last_used)
+                   VALUES (?, ?, 'general', ?, 0.7, ?, ?)""",
+                (pattern_key, summary[:60], summary, now, now),
+            )
+            return f"Created pattern: {summary[:50]}"
+
+    elif category == "strategy":
+        # Store as meta_rule
+        conn.execute(
+            """INSERT INTO meta_rules (rule_key, rule_value, category, created_at)
+               VALUES (?, ?, 'evolution', ?)""",
+            (f"evo_{int(now)}", summary, now),
+        )
+        return f"Stored strategy rule"
+
+    return ""
+
+
 async def handle_update(update: dict, db_conn):
     """Process a Telegram update (message or callback_query)."""
+    global _preferred_backend
     # --- Callback query (inline keyboard) ---
     if "callback_query" in update:
         cq = update["callback_query"]
@@ -103,12 +190,24 @@ async def handle_update(update: dict, db_conn):
             return
         if data.startswith("approve:"):
             evo_id = int(data.split(":")[1])
+            now = time.time()
+            # Read evolution details before updating
+            evo = db_conn.execute(
+                "SELECT id, category, summary, evidence_ids FROM evolutions WHERE id=?", (evo_id,)
+            ).fetchone()
             db_conn.execute(
                 "UPDATE evolutions SET status='approved', resolved_at=? WHERE id=?",
-                (time.time(), evo_id),
+                (now, evo_id),
             )
+            # Auto-apply: promote skill or add pattern
+            applied = False
+            if evo:
+                applied = _apply_evolution(db_conn, dict(evo), now)
             db_conn.commit()
-            await send_message(user_id, f"✅ Evolution #{evo_id} approved")
+            msg = f"✅ Evolution #{evo_id} approved"
+            if applied:
+                msg += f"\n⚡ Auto-applied: {applied}"
+            await send_message(user_id, msg)
         elif data.startswith("reject:"):
             evo_id = int(data.split(":")[1])
             db_conn.execute(
@@ -134,10 +233,15 @@ async def handle_update(update: dict, db_conn):
 
     # Non-command messages → AI chat
     if not text.startswith("/"):
-        from .llm_bridge import chat
+        from .llm_bridge import chat, BACKENDS
         await send_message(chat_id, "🤔 Thinking...")
-        response = await chat(text, system="You are a helpful programming assistant. Reply in the same language as the user. Be concise.")
-        await send_message(chat_id, response[:4000])
+        max_backends = 5
+        if _preferred_backend:
+            idx = next((i for i, b in enumerate(BACKENDS) if b["name"] == _preferred_backend), None)
+            if idx is not None:
+                max_backends = idx + 1
+        response = await chat(text, system="You are a helpful programming assistant. Reply in the same language as the user. Be concise.", max_backends=max_backends)
+        await send_message(chat_id, response)
         return
 
     parts = text.split(maxsplit=1)
@@ -299,10 +403,39 @@ async def handle_update(update: dict, db_conn):
             await send_message(chat_id, f"❌ Sync failed: {e}")
 
     elif cmd == "/chat" and arg:
-        from .llm_bridge import chat
+        from .llm_bridge import chat, BACKENDS
         await send_message(chat_id, "🤔 Thinking...")
-        response = await chat(arg, system="You are a helpful programming assistant. Be concise.")
-        await send_message(chat_id, response[:4000])
+        max_backends = 5
+        if _preferred_backend:
+            # Try preferred backend first
+            idx = next((i for i, b in enumerate(BACKENDS) if b["name"] == _preferred_backend), None)
+            if idx is not None:
+                max_backends = idx + 1
+        response = await chat(arg, system="You are a helpful programming assistant. Be concise.", max_backends=max_backends)
+        await send_message(chat_id, response)
+
+    elif cmd == "/model":
+        from .llm_bridge import BACKENDS
+        if not arg:
+            # Show current and available models
+            lines = ["*Available Models*"]
+            for i, b in enumerate(BACKENDS):
+                marker = " →" if b["name"] == _preferred_backend else ""
+                tag = "free" if b["key"] in ("none", "1") else "paid"
+                lines.append(f"`{b['name']}` [{tag}]{marker}")
+            lines.append(f"\nCurrent: `{_preferred_backend or 'auto (fallback chain)'}`")
+            lines.append("Usage: /model <name> or /model auto")
+            await send_message(chat_id, "\n".join(lines))
+        elif arg == "auto":
+            _preferred_backend = None
+            await send_message(chat_id, "🔄 Model set to auto (full fallback chain)")
+        else:
+            match = next((b for b in BACKENDS if b["name"] == arg), None)
+            if match:
+                _preferred_backend = arg
+                await send_message(chat_id, f"✅ Model set to `{arg}`")
+            else:
+                await send_message(chat_id, f"Unknown model: `{arg}`\nUse /model to see available models.")
 
     elif cmd == "/lima":
         from .llm_bridge import fetch_llm_stats
@@ -369,6 +502,20 @@ async def handle_update(update: dict, db_conn):
         else:
             await send_message(chat_id, "TTS failed.")
 
+    elif cmd == "/learn":
+        await send_message(chat_id, "🔍 Scanning GitHub trending repos...")
+        import subprocess, sys
+        try:
+            result = subprocess.run(
+                [sys.executable, "/opt/evo-server/learning/github_learner.py"],
+                capture_output=True, text=True, timeout=300,
+                env={**os.environ, "EVO_SERVER": "http://127.0.0.1:8090"},
+            )
+            output = result.stdout[-500:] if result.stdout else "No output"
+            await send_message(chat_id, f"*GitHub Learning Complete*\n```\n{output}\n```")
+        except Exception as e:
+            await send_message(chat_id, f"❌ Learning failed: {e}")
+
     elif cmd == "/help":
         await send_message(
             chat_id,
@@ -382,8 +529,10 @@ async def handle_update(update: dict, db_conn):
             "/reject <id> — Reject evolution\n"
             "/digest — Weekly summary\n"
             "/run — Manually trigger evolution\n"
+            "/learn — Scan GitHub trending repos\n"
             "/sync — Query LLM for improvement suggestions\n"
             "/lima — LLM integration status\n"
+            "/model [name] — Switch LLM model\n"
             "/chat <msg> — Chat with AI\n"
             "/say <text> — Text to speech (v2.5)\n"
             "/voice [model] <text> — Voice with model choice",

@@ -2,6 +2,7 @@
 """GitHub Learning Engine — search trending repos, extract patterns."""
 import json
 import os
+import sys
 import re
 import subprocess
 import tempfile
@@ -11,10 +12,11 @@ import base64
 from pathlib import Path
 from typing import List, Dict, Optional
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pattern_extractor import extract_patterns
 
 # Config
-EVO_SERVER = os.getenv("EVO_SERVER", "http://119.45.204.198")
+EVO_SERVER = os.getenv("EVO_SERVER", "http://127.0.0.1:8090")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 LANGUAGES = os.getenv("EVO_LEARN_LANGUAGES", "python,rust,go,typescript").split(",")
 MAX_REPOS = 3

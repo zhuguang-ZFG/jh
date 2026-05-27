@@ -2,6 +2,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
+import os
 import time
 import logging
 
@@ -61,6 +62,12 @@ def _start_scheduler():
                 _run_llm_sync_job, "cron", hour=5, minute=0,
                 id="llm_sync",
             )
+
+        # GitHub learning: 02:00 UTC (10:00 CST), daily
+        _scheduler.add_job(
+            _run_learning_job, "cron", hour=2, minute=30,
+            id="github_learning",
+        )
 
         _scheduler.start()
         logger.info("APScheduler started (weekly_evolution + daily_maintenance)")
@@ -154,10 +161,27 @@ async def _async_llm_sync():
         await send_notification(f"LLM sync failed: {e}")
 
 
+def _run_learning_job():
+    """GitHub learning — scan trending repos for code patterns."""
+    import subprocess
+    import sys
+    try:
+        result = subprocess.run(
+            [sys.executable, "/opt/evo-server/learning/github_learner.py"],
+            capture_output=True, text=True, timeout=300,
+            env={**os.environ, "EVO_SERVER": "http://127.0.0.1:8090"},
+        )
+        logger.info(f"GitHub learning: {result.stdout[-200:] if result.stdout else 'no output'}")
+        if result.returncode != 0:
+            logger.error(f"GitHub learning failed: {result.stderr[-200:]}")
+    except Exception as e:
+        logger.error(f"GitHub learning job error: {e}")
+
+
 app = FastAPI(title="Evo-Server", version="0.1.0", lifespan=lifespan)
 
 # --- API key middleware ---
-EXEMPT_PATHS = {"/health", "/docs", "/openapi.json", "/telegram/webhook"}
+EXEMPT_PATHS = {"/health", "/stats", "/docs", "/openapi.json", "/telegram/webhook"}
 
 
 @app.middleware("http")
@@ -169,6 +193,33 @@ async def auth_middleware(request: Request, call_next):
         if token != config.API_KEY:
             return JSONResponse(status_code=401, content={"ok": False, "message": "Unauthorized"})
     return await call_next(request)
+
+
+# --- Request logging middleware ---
+from collections import defaultdict
+import threading
+
+_request_stats = defaultdict(lambda: {"count": 0, "errors": 0, "total_ms": 0})
+_stats_lock = threading.Lock()
+
+
+@app.middleware("http")
+async def logging_middleware(request: Request, call_next):
+    import time as _time
+    start = _time.monotonic()
+    response = await call_next(request)
+    elapsed_ms = int((_time.monotonic() - start) * 1000)
+    path = request.url.path
+    status = response.status_code
+    with _stats_lock:
+        stats = _request_stats[path]
+        stats["count"] += 1
+        stats["total_ms"] += elapsed_ms
+        if status >= 400:
+            stats["errors"] += 1
+    if status >= 500:
+        logger.warning(f"HTTP {status} {path} ({elapsed_ms}ms)")
+    return response
 
 
 # --- Routers ---
@@ -195,6 +246,21 @@ def health():
         "events": conn.execute("SELECT COUNT(*) c FROM events").fetchone()["c"],
     }
     return {"ok": True, "uptime": time.time(), "stats": stats}
+
+
+@app.get("/stats")
+def request_stats():
+    """API request statistics — call count, errors, latency per path."""
+    with _stats_lock:
+        result = {}
+        for path, s in sorted(_request_stats.items(), key=lambda x: -x[1]["count"]):
+            avg_ms = s["total_ms"] // max(s["count"], 1)
+            result[path] = {
+                "count": s["count"],
+                "errors": s["errors"],
+                "avg_ms": avg_ms,
+            }
+    return {"ok": True, "paths": result}
 
 
 # --- Telegram webhook ---

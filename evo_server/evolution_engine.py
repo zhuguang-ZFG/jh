@@ -387,31 +387,93 @@ async def run_weekly_evolution() -> dict:
 # ── Daily skill maintenance ──────────────────────────────────────
 
 def run_daily_maintenance() -> dict:
-    """Daily maintenance: evict dead skills, compress old sessions."""
+    """Daily maintenance: evict dead skills, compress old sessions, promote lessons."""
     conn = get_conn()
     now = time.time()
+    stats = {}
 
-    # Evict skills with weight < 0.1 that haven't been used in 30 days
+    # 1. Evict skills with weight < 0.1 that haven't been used in 30 days
     cutoff = now - 30 * 86400
     evicted = conn.execute(
         "DELETE FROM skills WHERE weight < 0.1 AND last_used < ? AND last_used > 0",
         (cutoff,),
     ).rowcount
+    stats["evicted_skills"] = evicted
 
-    # Compress sessions older than 30 days (keep summary, drop details)
-    old_sessions = conn.execute(
-        "SELECT id, session_id, lessons FROM sessions WHERE created_at < ? AND lessons != ''",
-        (now - 30 * 86400,),
-    ).fetchall()
+    # 2. Compress sessions older than 7 days (clear changed_files, keep lessons)
+    week_ago = now - 7 * 86400
+    compressed = conn.execute(
+        "UPDATE sessions SET changed_files='[]' WHERE created_at < ? AND changed_files != '[]'",
+        (week_ago,),
+    ).rowcount
+    stats["compressed_sessions"] = compressed
 
-    compressed = 0
-    for s in old_sessions:
-        # Keep lessons but clear changed_files to save space
+    # 3. Hard cap: keep max 200 sessions, delete oldest beyond that
+    total = conn.execute("SELECT COUNT(*) c FROM sessions").fetchone()["c"]
+    if total > 200:
+        excess = total - 200
+        # Preserve lessons from excess sessions before deleting
+        excess_rows = conn.execute(
+            "SELECT id, lessons FROM sessions ORDER BY created_at ASC LIMIT ?",
+            (excess,),
+        ).fetchall()
+        promoted = 0
+        for row in excess_rows:
+            if row["lessons"] and len(row["lessons"]) > 10:
+                _maybe_promote_lesson(conn, row["lessons"], now)
+                promoted += 1
         conn.execute(
-            "UPDATE sessions SET changed_files='[]' WHERE id=?",
-            (s["id"],),
+            "DELETE FROM sessions WHERE id IN (SELECT id FROM sessions ORDER BY created_at ASC LIMIT ?)",
+            (excess,),
         )
-        compressed += 1
+        stats["deleted_excess"] = excess
+        stats["promoted_from_excess"] = promoted
+
+    # 4. Auto-promote high-success lessons to skills
+    recent = conn.execute(
+        "SELECT lessons, outcome FROM sessions WHERE created_at > ? AND lessons != ''",
+        (now - 14 * 86400,),
+    ).fetchall()
+    new_skills = 0
+    for row in recent:
+        if row["outcome"] == "success" and row["lessons"]:
+            if _maybe_promote_lesson(conn, row["lessons"], now):
+                new_skills += 1
+    stats["new_skills_promoted"] = new_skills
 
     conn.commit()
-    return {"evicted_skills": evicted, "compressed_sessions": compressed}
+    return stats
+
+
+def _maybe_promote_lesson(conn, lesson_text: str, now: float) -> bool:
+    """Promote a lesson to a skill if it's substantive and not already known."""
+    lesson = lesson_text.strip()[:200]
+    if len(lesson) < 15:
+        return False
+    import hashlib
+    skill_key = hashlib.sha256(lesson.encode()).hexdigest()[:16]
+    existing = conn.execute(
+        "SELECT id FROM skills WHERE skill_key=?", (skill_key,)
+    ).fetchone()
+    if existing:
+        return False
+    # Infer domain from lesson text
+    domain = "general"
+    lower = lesson.lower()
+    if any(k in lower for k in ("python", "django", "flask", "fastapi")):
+        domain = "python"
+    elif any(k in lower for k in ("rust", "cargo")):
+        domain = "rust"
+    elif any(k in lower for k in ("go ", "golang")):
+        domain = "go"
+    elif any(k in lower for k in ("react", "typescript", "javascript", "vue")):
+        domain = "frontend"
+    elif any(k in lower for k in ("docker", "nginx", "deploy", "ci/cd")):
+        domain = "devops"
+    conn.execute(
+        """INSERT INTO skills (skill_key, name, domain, pattern, weight, use_count,
+                               success_count, created_at, last_used, source)
+           VALUES (?, ?, ?, ?, 0.6, 1, 1, ?, ?, 'auto_promoted')""",
+        (skill_key, lesson[:60], domain, lesson, now, now),
+    )
+    return True
