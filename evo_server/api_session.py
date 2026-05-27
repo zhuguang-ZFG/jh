@@ -47,7 +47,6 @@ def log_session(s: SessionLog):
             ),
         )
         conn.commit()
-        return ApiResponse(ok=True, message="Session logged")
     except conn.IntegrityError:
         return ApiResponse(ok=False, message="Duplicate session_id")
 
