@@ -295,54 +295,23 @@ async def handle_update(update: dict, db_conn):
         )
         await send_message(chat_id, msg)
 
-    elif cmd == "/approve":
-        if not arg:
-            # No ID given — show pending evolutions
-            rows = db_conn.execute(
-                "SELECT id, category, summary, confidence FROM evolutions WHERE status='proposed' ORDER BY created_at DESC LIMIT 10"
-            ).fetchall()
-            if rows:
-                lines = ["*Pending Evolutions (use /approve <id>)*"]
-                for r in rows:
-                    lines.append(f"#{r['id']} [{r['category']}] conf={r['confidence']:.1f}\n  {r['summary'][:120]}")
-                await send_message(chat_id, "\n".join(lines))
-            else:
-                await send_message(chat_id, "No pending evolutions.")
+    elif cmd in ("/approve", "/reject"):
+        rows = db_conn.execute(
+            "SELECT id, category, summary, confidence FROM evolutions WHERE status='proposed' ORDER BY created_at DESC LIMIT 10"
+        ).fetchall()
+        if not rows:
+            await send_message(chat_id, "No pending evolutions.")
             return
-        try:
-            evo_id = int(arg)
-            db_conn.execute(
-                "UPDATE evolutions SET status='approved', resolved_at=? WHERE id=? AND status='proposed'",
-                (time.time(), evo_id),
+        for r in rows:
+            text = (
+                f"*#{r['id']}* [{r['category']}] conf={r['confidence']:.1f}\n"
+                f"{r['summary'][:200]}"
             )
-            db_conn.commit()
-            await send_message(chat_id, f"✅ Evolution #{evo_id} approved")
-        except ValueError:
-            await send_message(chat_id, "Usage: /approve <id>")
-
-    elif cmd == "/reject":
-        if not arg:
-            rows = db_conn.execute(
-                "SELECT id, category, summary, confidence FROM evolutions WHERE status='proposed' ORDER BY created_at DESC LIMIT 10"
-            ).fetchall()
-            if rows:
-                lines = ["*Pending Evolutions (use /reject <id>)*"]
-                for r in rows:
-                    lines.append(f"#{r['id']} [{r['category']}] conf={r['confidence']:.1f}\n  {r['summary'][:120]}")
-                await send_message(chat_id, "\n".join(lines))
-            else:
-                await send_message(chat_id, "No pending evolutions.")
-            return
-        try:
-            evo_id = int(arg)
-            db_conn.execute(
-                "UPDATE evolutions SET status='rejected', resolved_at=? WHERE id=? AND status='proposed'",
-                (time.time(), evo_id),
-            )
-            db_conn.commit()
-            await send_message(chat_id, f"❌ Evolution #{evo_id} rejected")
-        except ValueError:
-            await send_message(chat_id, "Usage: /reject <id>")
+            buttons = [[
+                {"text": "✅ Approve", "data": f"approve:{r['id']}"},
+                {"text": "❌ Reject", "data": f"reject:{r['id']}"},
+            ]]
+            await send_inline_keyboard(chat_id, text, buttons)
 
     elif cmd == "/start":
         await send_message(
