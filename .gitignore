@@ -1,0 +1,14 @@
+.env
+*.db
+*.db-wal
+*.db-shm
+__pycache__/
+*.pyc
+.pytest_cache/
+.playwright-mcp/
+.claude/
+*.pem
+*.key
+data/
+logs/
+node_modules/

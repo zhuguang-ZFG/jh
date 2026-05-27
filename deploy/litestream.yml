@@ -1,0 +1,6 @@
+# Litestream — SQLite continuous replication for evo-server
+dbs:
+  - path: /opt/evo-server/data/evo.db
+    replicas:
+      - type: file
+        path: /opt/evo-server/backups/litestream/evo
