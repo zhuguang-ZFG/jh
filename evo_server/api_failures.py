@@ -62,8 +62,11 @@ def list_failures(domain="", error_type="", limit=20):
     return ApiResponse(ok=True, data=[dict(r) for r in rows])
 
 
-@router.get("/failures/relevant")
-def relevant_failures(context="", limit=5):
+@router.post("/failures/relevant")
+def relevant_failures(
+    context: str = Body(""),
+    limit: int = Body(5),
+):
     """Get failure patterns relevant to a context string (keyword match)."""
     conn = get_conn()
     if not context:

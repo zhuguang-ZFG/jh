@@ -197,7 +197,7 @@ def format_context(all_data):
     # 1. Failure warnings (HIGHEST PRIORITY — prevent repeated mistakes)
     failures = all_data.get("failures", [])
     if failures:
-        lines.append("## ⚠️ Avoid These Mistakes")
+        lines.append("## [!] Avoid These Mistakes")
         for f in failures[:3]:
             lines.append(f"- **{f['error_type']}**: {f['description'][:120]}")
             if f.get("fix_suggestion"):
