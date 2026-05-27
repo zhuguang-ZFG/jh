@@ -6,6 +6,7 @@ import re
 import subprocess
 import tempfile
 import urllib.request
+import urllib.parse
 from pathlib import Path
 
 # Config
@@ -30,8 +31,9 @@ def search_trending(language: str, since: str = "daily") -> list[dict]:
     """Search GitHub for trending repos by language and recent activity."""
     # Use GitHub search API: repos created/updated recently with high stars
     query = f"language:{language} created:>{_days_ago(7)} stars:>50"
+    encoded_query = urllib.parse.quote(query)
     try:
-        result = github_api(f"/search/repositories?q={query}&sort=stars&order=desc&per_page=5")
+        result = github_api(f"/search/repositories?q={encoded_query}&sort=stars&order=desc&per_page=5")
         return result.get("items", [])[:MAX_REPOS]
     except Exception as e:
         print(f"[learner] Search failed for {language}: {e}")

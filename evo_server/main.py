@@ -11,6 +11,7 @@ from .api_memory import router as memory_router
 from .api_session import router as session_router
 from .api_skills import router as skills_router
 from .api_evo import router as evo_router
+from .api_patterns import router as patterns_router
 from .api_lima import router as lima_router
 
 logger = logging.getLogger("evo")
@@ -164,6 +165,7 @@ app.include_router(memory_router)
 app.include_router(session_router)
 app.include_router(skills_router)
 app.include_router(evo_router)
+app.include_router(patterns_router)
 app.include_router(lima_router)
 
 
