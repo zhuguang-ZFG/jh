@@ -132,7 +132,12 @@ async def handle_update(update: dict, db_conn):
         await send_message(chat_id, "Unauthorized.")
         return
 
+    # Non-command messages → AI chat
     if not text.startswith("/"):
+        from .llm_bridge import chat
+        await send_message(chat_id, "🤔 Thinking...")
+        response = await chat(text, system="You are a helpful programming assistant. Reply in the same language as the user. Be concise.")
+        await send_message(chat_id, response[:4000])
         return
 
     parts = text.split(maxsplit=1)
@@ -266,32 +271,47 @@ async def handle_update(update: dict, db_conn):
                     await send_inline_keyboard(chat_id, text, buttons)
 
     elif cmd == "/sync":
-        await send_message(chat_id, "🔗 Syncing with LiMa server...")
-        from .lima_bridge import run_lima_sync
+        await send_message(chat_id, "🔗 Querying LLM for knowledge...")
+        from .llm_bridge import chat, export_evo_knowledge
         try:
-            result = await run_lima_sync()
+            knowledge = export_evo_knowledge()
+            skills_summary = ", ".join(
+                f"{s['name']}[{s['domain']}]"
+                for s in knowledge["top_skills"][:5]
+            )
+            response = await chat(
+                f"Given skills: {skills_summary}\nSuggest 3 improvements.",
+                system="Return JSON array: [{category, summary, confidence}]. No explanation.",
+            )
+            import json
+            suggestions = []
+            try:
+                suggestions = json.loads(response)
+            except Exception:
+                pass
             msg = (
-                f"🔗 *LiMa Sync Complete*\n"
-                f"Stats: {result['stats']['imported']} rules\n"
-                f"Skills: {result['knowledge']['imported_skills']}\n"
-                f"Patterns: {result['knowledge']['imported_patterns']}\n"
-                f"Exported: {result['export']['skills']} skills, {result['export']['patterns']} patterns"
+                f"🔗 *LLM Sync Complete*\n"
+                f"Knowledge exported: {knowledge['skills_count']} skills, {knowledge['patterns_count']} patterns\n"
+                f"Suggestions: {len(suggestions)}"
             )
             await send_message(chat_id, msg)
         except Exception as e:
             await send_message(chat_id, f"❌ Sync failed: {e}")
 
+    elif cmd == "/chat" and arg:
+        from .llm_bridge import chat
+        await send_message(chat_id, "🤔 Thinking...")
+        response = await chat(arg, system="You are a helpful programming assistant. Be concise.")
+        await send_message(chat_id, response[:4000])
+
     elif cmd == "/lima":
-        from .lima_bridge import fetch_lima_stats
-        stats = await fetch_lima_stats()
-        mem = stats.get("memory", {})
-        outcome = stats.get("outcome", {})
+        from .llm_bridge import fetch_llm_stats
+        stats = await fetch_llm_stats()
         msg = (
-            f"*LiMa Server Status*\n"
-            f"Memory: {mem.get('total', '?')} entries\n"
-            f"  Types: {', '.join(f'{k}({v})' for k, v in mem.get('by_type', {}).items())}\n"
-            f"Outcome: {outcome.get('total', '?')} entries\n"
-            f"  Success: {outcome.get('by_source', {}).get('telegram', {}).get('success', '?')}/{outcome.get('by_source', {}).get('telegram', {}).get('total', '?')}"
+            f"*LLM Status*\n"
+            f"Provider: {stats.get('provider', '?')}\n"
+            f"Model: {stats.get('model', '?')}\n"
+            f"Status: {stats.get('status', '?')}"
         )
         await send_message(chat_id, msg)
 
@@ -362,8 +382,9 @@ async def handle_update(update: dict, db_conn):
             "/reject <id> — Reject evolution\n"
             "/digest — Weekly summary\n"
             "/run — Manually trigger evolution\n"
-            "/sync — Sync knowledge with LiMa server\n"
-            "/lima — LiMa server status\n"
+            "/sync — Query LLM for improvement suggestions\n"
+            "/lima — LLM integration status\n"
+            "/chat <msg> — Chat with AI\n"
             "/say <text> — Text to speech (v2.5)\n"
             "/voice [model] <text> — Voice with model choice",
         )

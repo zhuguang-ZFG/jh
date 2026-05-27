@@ -44,6 +44,11 @@ EMA_FAILURE_FACTOR = _float("EVO_EMA_FAILURE", 0.9)
 EVIDENCE_MIN = _int("EVO_EVIDENCE_MIN", 3)
 PASS_RATE_MIN = _float("EVO_PASS_RATE_MIN", 0.8)
 
-# LiMa cross-server sync
-LIMA_SYNC_ENABLED = os.getenv("LIMA_SYNC_ENABLED", "true").lower() == "true"
-LIMA_SYNC_INTERVAL_HOURS = _int("LIMA_SYNC_INTERVAL_HOURS", 24)
+# LLM integration (multi-backend, free-first)
+LLM_SYNC_ENABLED = os.getenv("LLM_SYNC_ENABLED", "true").lower() == "true"
+LLM_SYNC_INTERVAL_HOURS = _int("LLM_SYNC_INTERVAL_HOURS", 24)
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+ZHIPU_API_KEY = os.getenv("ZHIPU_API_KEY", "")
+ALIBABA_API_KEY = os.getenv("ALIBABA_API_KEY", "")
+CF_ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID", "")
+CF_API_KEY = os.getenv("CF_API_KEY", "")
