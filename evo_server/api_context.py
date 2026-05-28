@@ -511,32 +511,6 @@ def get_quality_health():
 
 # ── Helpers ───────────────────────────────────────────────────
 
-def _extract_keywords(text):
-    # type: (str) -> List[str]
-    """Extract meaningful keywords from task description."""
-    import re
-    # Remove common stop words
-    stop_words = {
-        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-        "have", "has", "had", "do", "does", "did", "will", "would", "could",
-        "should", "may", "might", "shall", "can", "to", "of", "in", "for",
-        "on", "with", "at", "by", "from", "as", "into", "through", "during",
-        "before", "after", "above", "below", "between", "this", "that",
-        "these", "those", "it", "its", "and", "or", "not", "but", "if",
-        "i", "you", "he", "she", "we", "they", "me", "him", "her", "us",
-        "my", "your", "his", "our", "their", "what", "which", "who", "whom",
-        "how", "when", "where", "why", "all", "each", "every", "both",
-        "few", "more", "most", "other", "some", "such", "no", "only",
-        "same", "than", "too", "very", "just", "also", "now", "here",
-        "there", "then", "so", "up", "out", "about", "get", "got",
-        "make", "made", "let", "need", "use", "using", "used",
-        "fix", "add", "create", "update", "change", "remove", "delete",
-        "help", "please", "want", "try", "need", "implement", "build",
-    }
-    words = re.findall(r"[a-zA-Z_]{3,}", text.lower())
-    return list(set(w for w in words if w not in stop_words))[:8]
-
-
 def _format_skill(row):
     r = dict(row)
     result = {

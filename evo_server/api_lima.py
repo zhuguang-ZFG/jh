@@ -50,7 +50,7 @@ async def trigger_sync():
                    VALUES (?, ?, 'llm_sync', ?)""",
                 (key, value, now),
             )
-        except Exception:
+        except conn.IntegrityError:
             conn.execute(
                 "UPDATE meta_rules SET rule_value=?, created_at=? WHERE rule_key=?",
                 (value, now, key),
@@ -61,7 +61,7 @@ async def trigger_sync():
         conn.execute(
             """INSERT INTO events (event_id, source, event_type, outcome, details, recorded_at)
                VALUES (?, 'llm', 'knowledge_sync', 'success', ?, ?)""",
-            (str(uuid.uuid4())[:8], json.dumps({"suggestions": len(suggestions)}), now),
+            (str(uuid.uuid4())[:8], _json.dumps({"suggestions": len(suggestions)}), now),
         )
         conn.commit()
 
@@ -164,8 +164,8 @@ async def ingest_corrections(req: CorrectionIngest):
                             rules = data
                     except _json.JSONDecodeError:
                         pass
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Correction LLM failed: %s", e)
 
     # Store as high-weight skills
     conn = get_conn()

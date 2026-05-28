@@ -37,7 +37,6 @@ def create_skill(
     source: str = Body("manual"),
 ):
     """Create or update a skill."""
-    import hashlib
     conn = get_conn()
     now = time.time()
     key = hashlib.sha256(f"{name}:{domain}:{pattern[:80]}".encode()).hexdigest()[:16]
