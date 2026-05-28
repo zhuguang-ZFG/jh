@@ -116,6 +116,12 @@ def _start_scheduler():
             id="effect_analysis",
         )
 
+        # Nightly digest: 08:30 UTC (16:30 CST), daily
+        _scheduler.add_job(
+            _run_digest_job, "cron", hour=8, minute=30,
+            id="nightly_digest",
+        )
+
         _scheduler.start()
         logger.info("APScheduler started (weekly_evolution + daily_maintenance + quality_report + skill_refinement)")
     except ImportError:
@@ -368,6 +374,116 @@ def _run_effect_analysis_job():
         )
     except Exception as e:
         logger.error(f"Effect analysis failed: {e}")
+
+
+def _run_digest_job():
+    """Nightly digest — summarize the day's findings and push to Telegram."""
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(_async_digest())
+        else:
+            loop.run_until_complete(_async_digest())
+    except RuntimeError:
+        asyncio.run(_async_digest())
+
+
+async def _async_digest():
+    from .telegram_bot import send_notification
+    try:
+        conn = get_conn()
+        now = __import__("time").time()
+        cutoff = now - 86400  # last 24 hours
+
+        # Sessions in last 24h
+        sessions = conn.execute(
+            "SELECT COUNT(*), SUM(CASE WHEN outcome='success' THEN 1 ELSE 0 END) "
+            "FROM sessions WHERE created_at > ?", (cutoff,)
+        ).fetchone()
+        total_s = sessions[0] or 0
+        success_s = sessions[1] or 0
+        rate_s = f"{success_s}/{total_s}" if total_s else "none"
+
+        # New skills today
+        new_skills = conn.execute(
+            "SELECT COUNT(*) FROM skills WHERE created_at > ?", (cutoff,)
+        ).fetchone()[0]
+
+        # Cross-session discoveries
+        discoveries = conn.execute(
+            "SELECT name, pattern FROM skills WHERE source='cross_session' "
+            "AND created_at > ? ORDER BY weight DESC LIMIT 3", (cutoff,)
+        ).fetchall()
+
+        # Effect lift
+        lift_row = conn.execute(
+            "SELECT lift from effect_metrics ORDER BY metric_date DESC LIMIT 1"
+        ).fetchone()
+        lift_val = round(lift_row["lift"], 3) if lift_row else None
+
+        # Quality health
+        q_row = conn.execute(
+            "SELECT avg_score, success_rate FROM quality_weekly "
+            "ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+
+        # Top failures in last 24h
+        failures = conn.execute(
+            "SELECT error_type, description, occurrences FROM failure_patterns "
+            "WHERE last_seen > ? ORDER BY occurrences DESC LIMIT 3", (cutoff,)
+        ).fetchall()
+
+        # Top skills by weight
+        top_skills = conn.execute(
+            "SELECT name, domain, weight FROM skills WHERE weight > 1.0 "
+            "ORDER BY weight DESC LIMIT 3"
+        ).fetchall()
+
+        # Build message
+        lines = ["*Nightly Digest*\n"]
+
+        lines.append("*Sessions:* %s (%s success)"
+                    % (total_s, rate_s) if total_s else "*Sessions:* none today")
+
+        if new_skills:
+            lines.append("*New skills:* %d" % new_skills)
+
+        if discoveries:
+            lines.append("\n*Discoveries:*")
+            for d in discoveries:
+                lines.append("  - *%s*: %s"
+                            % (d["name"], (d["pattern"] or "")[:60]))
+
+        if lift_val is not None:
+            direction = "↑" if lift_val > 0 else "↓"
+            lines.append("\n*Effect lift:* %s%.3f" % (direction, lift_val))
+
+        if q_row:
+            qs = round(q_row["avg_score"], 0)
+            qr = round(q_row["success_rate"] * 100)
+            lines.append("*Quality:* score=%d, rate=%d%%" % (qs, qr))
+
+        if failures:
+            lines.append("\n*Top failures:*")
+            for f in failures:
+                lines.append("  - %s: %s (%dx)"
+                            % (f["error_type"], (f["description"] or "")[:60],
+                               f["occurrences"]))
+
+        if top_skills:
+            lines.append("\n*Top skills:*")
+            for s in top_skills:
+                lines.append("  - *%s* [%s] w=%.1f"
+                            % (s["name"], s["domain"], s["weight"]))
+
+        lines.append("\n_%s_" % "evolved   run /status for details")
+
+        await send_notification("\n".join(lines))
+        logger.info("Nightly digest sent (%d sessions, %d discoveries)",
+                   total_s, len(discoveries))
+    except Exception as e:
+        logger.error("Nightly digest failed: %s", e)
 
 
 def _run_cross_session_job():

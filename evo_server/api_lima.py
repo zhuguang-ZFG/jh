@@ -103,6 +103,15 @@ async def trigger_discovery():
     return ApiResponse(ok=True, data=result)
 
 
+@router.post("/digest")
+async def trigger_digest():
+    """Manually trigger nightly digest."""
+    import importlib
+    main_mod = importlib.import_module("evo_server.main")
+    await main_mod._async_digest()
+    return ApiResponse(ok=True, message="Digest sent")
+
+
 class CorrectionIngest(BaseModel):
     corrections: list = Field(..., min_length=1, max_length=10)
     session_id: str = "unknown"
