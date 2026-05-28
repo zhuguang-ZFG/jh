@@ -148,20 +148,24 @@ def _vec_search_raw(conn, vec_table: str, content_table: str,
 def _bm25_search(conn, fts_table: str, content_table: str,
                  query: str, limit: int,
                  min_weight: float, domain: str) -> List[dict]:
-    """FTS5 BM25 search. Returns results with _score or empty list."""
-    # Escape FTS5 special characters and build query
+    """FTS5 keyword search. Returns results with _score or empty list.
+
+    FTS5 MATCH returns results in relevance order by default.
+    We use position-based scoring (not bm25() which returns NULL on
+    older SQLite with content= external content tables).
+    """
     fts_query = _build_fts_query(query)
     if not fts_query:
         return []
 
     try:
-        # FTS5 bm25() returns negative scores (lower = more relevant)
-        # We normalize to 0-1 range
+        # FTS5 MATCH returns results ordered by relevance (best first)
+        # Use rowid ordering as a stable tiebreaker
         sql = f"""
-            SELECT fts.rowid, bm25({fts_table}) AS rank
+            SELECT rowid
             FROM {fts_table}
             WHERE {fts_table} MATCH :q
-            ORDER BY rank
+            ORDER BY rowid
             LIMIT :lim
         """
         rows = conn.execute(sql, {"q": fts_query, "lim": limit}).fetchall()
@@ -171,19 +175,19 @@ def _bm25_search(conn, fts_table: str, content_table: str,
 
         # Get content rows
         ids = [r["rowid"] for r in rows]
-        rank_map = {r["rowid"]: r["rank"] for r in rows}
         placeholders = ",".join("?" * len(ids))
         content_rows = conn.execute(
             f"SELECT * FROM {content_table} WHERE id IN ({placeholders})", ids
         ).fetchall()
 
-        # Normalize BM25 scores to 0-1 (bm25 returns negative, lower = better)
-        # Convert: score = 1 / (1 + abs(rank))
+        # Position-based scoring: score decays with position
+        # score = 1.0 / (1 + position * 0.1) — top result gets ~0.91, 10th gets ~0.5
+        id_to_pos = {r["rowid"]: i for i, r in enumerate(rows)}
         result = []
         for r in content_rows:
             d = dict(r)
-            raw_rank = rank_map.get(d["id"], -100)
-            d["_score"] = 1.0 / (1.0 + abs(raw_rank))
+            pos = id_to_pos.get(d["id"], len(rows))
+            d["_score"] = 1.0 / (1.0 + pos * 0.1)
             if domain and d.get("domain") != domain:
                 continue
             if min_weight > 0:

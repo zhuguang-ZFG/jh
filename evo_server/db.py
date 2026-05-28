@@ -341,7 +341,11 @@ def _init_vec_tables(conn: sqlite3.Connection):
 
 
 def _init_fts_tables(conn: sqlite3.Connection):
-    """Create FTS5 virtual tables for BM25 search."""
+    """Create FTS5 virtual tables for keyword search.
+
+    Uses content= external content tables. bm25() may return NULL on
+    older SQLite versions, so vec_search uses position-based ranking instead.
+    """
     fts_defs = [
         ("skills_fts", "skills", ["name", "domain", "pattern"]),
         ("patterns_fts", "patterns", ["name", "domain", "description"]),
@@ -360,7 +364,7 @@ def _init_fts_tables(conn: sqlite3.Connection):
 
     conn.commit()
 
-    # Initial rebuild if tables are empty
+    # Initial rebuild
     from . import fts_sync
     try:
         fts_sync.rebuild_all_fts(conn)
