@@ -15,7 +15,7 @@ import subprocess
 
 from evo_hook_common import (
     api, parse_transcript, infer_domain, extract_skills, extract_memories,
-    extract_corrections,
+    extract_corrections, extract_successes,
     read_changed_files, flush_injections, generate_quality_snapshot, TRACKER_FILE,
 )
 
@@ -207,6 +207,20 @@ def main():
             pass
         if corrections_saved:
             print(f"[evo] {corrections_saved} corrections saved", file=sys.stderr)
+
+    # Extract and ingest positive patterns (what worked well)
+    successes = extract_successes(transcript_data, outcome)
+    if successes:
+        for suc in successes:
+            try:
+                api("POST", "/lima/successes", {
+                    "signals": suc["signals"],
+                    "files": suc["files"],
+                    "confidence": suc["confidence"],
+                    "session_id": session_id,
+                })
+            except Exception:
+                pass
 
     # Flush accumulated injection data with real session_id
     injections_flushed = flush_injections(session_id)

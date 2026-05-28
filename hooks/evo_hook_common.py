@@ -476,6 +476,56 @@ def extract_corrections(transcript_data):
     return corrections[:5]
 
 
+def extract_successes(transcript_data, outcome):
+    """Extract positive patterns from successful sessions.
+
+    When Claude succeeds, capture WHAT worked — approaches, patterns,
+    workflows that led to success. These become positive feedback signals.
+    """
+    if not transcript_data or outcome != "success":
+        return []
+
+    # Collect evidence of what went well
+    signals = []
+
+    # Low error count = clean execution
+    errors = transcript_data.get("errors_encountered", [])
+    if len(errors) == 0:
+        signals.append("zero errors — clean execution")
+
+    # Edits without rewrites = got it right first time
+    edit_count = len(transcript_data.get("edit_details", []))
+    if edit_count <= 3:
+        signals.append(f"efficient: only {edit_count} edits")
+
+    # File coverage
+    files = list(set(
+        transcript_data.get("files_edited", []) +
+        transcript_data.get("files_written", [])
+    ))
+    if 1 <= len(files) <= 5:
+        signals.append(f"focused: {len(files)} files changed")
+
+    # What did the user say?
+    user_msgs = transcript_data.get("user_messages", [])
+    praise_keywords = ["对", "好", "可以", "good", "yes", "works", "thanks", "great"]
+    praise = []
+    for msg in user_msgs:
+        if any(k in msg.lower() for k in praise_keywords) and len(msg) > 10:
+            praise.append(msg[:200])
+    if praise:
+        signals.append("user approval: " + praise[0][:150])
+
+    if not signals:
+        return []
+
+    return [{
+        "signals": signals,
+        "files": files[:10],
+        "confidence": 0.8,
+    }]
+
+
 def generate_quality_snapshot(transcript_data, changed_files, git_diff, outcome, session_id):
     """Generate quality metrics from session data for quality_snapshots table.
 

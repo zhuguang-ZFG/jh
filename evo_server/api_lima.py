@@ -213,3 +213,93 @@ async def ingest_corrections(req: CorrectionIngest):
 
     logger.info(f"Corrections ingested: {saved} rules from {len(req.corrections)} raw")
     return ApiResponse(ok=True, data={"saved": saved})
+
+
+class SuccessIngest(BaseModel):
+    signals: list = Field(default_factory=list)
+    files: list = Field(default_factory=list)
+    confidence: float = 0.8
+    session_id: str = "unknown"
+
+
+@router.post("/successes")
+async def ingest_successes(req: SuccessIngest):
+    """Ingest positive patterns from successful sessions.
+
+    When Claude succeeds, extract what worked — approach, pattern, workflow.
+    These become high-weight positive feedback signals injected next time.
+    """
+    if not req.signals:
+        return ApiResponse(ok=True, data={"saved": 0, "reason": "empty"})
+
+    from .llm_bridge import chat
+    import hashlib as _h
+
+    signals_text = "\n".join(req.signals[:5])
+    files_text = ", ".join(req.files[:5]) if req.files else "unknown"
+
+    system = (
+        "Extract a POSITIVE coding pattern from this successful session. "
+        "Identify what approach or workflow led to success.\n\n"
+        "Return JSON object ONLY:\n"
+        '{"name": "short_descriptive_name", "domain": "python|devops|general|...", '
+        '"pattern": "what worked well — concrete, actionable, 1-2 sentences"}'
+    )
+
+    response = ""
+    try:
+        response = await chat(
+            f"Success signals: {signals_text}\nFiles: {files_text}\n"
+            "Extract the positive pattern that led to this success.",
+            system=system, temperature=0.2, max_backends=3,
+        )
+    except Exception:
+        pass
+
+    if not response or response.startswith("Error:"):
+        return ApiResponse(ok=True, data={"saved": 0, "reason": "llm_failed"})
+
+    rule = {}
+    try:
+        rule = _json.loads(response.strip())
+        if not isinstance(rule, dict):
+            rule = {}
+    except _json.JSONDecodeError:
+        import re as _r3
+        match = _r3.search(r"\{.*\}", response, re.DOTALL)
+        if match:
+            try:
+                rule = _json.loads(match.group())
+            except _json.JSONDecodeError:
+                pass
+
+    if not rule.get("pattern"):
+        return ApiResponse(ok=True, data={"saved": 0, "reason": "empty_pattern"})
+
+    name = rule.get("name", "positive_pattern")[:100]
+    domain = rule.get("domain", "general")
+    pattern = rule.get("pattern", "")[:300]
+
+    conn = get_conn()
+    now = time.time()
+    sk = _h.sha256(f"{name}:{domain}:{pattern[:80]}".encode()).hexdigest()[:16]
+
+    try:
+        conn.execute(
+            """INSERT INTO skills
+               (skill_key, name, domain, pattern, weight,
+                use_count, success_count, created_at, last_used, source)
+               VALUES (?, ?, ?, ?, 1.5, 0, 1, ?, 0, 'success_pattern')""",
+            (sk, name, domain, pattern, now),
+        )
+        saved = 1
+    except conn.IntegrityError:
+        conn.execute(
+            "UPDATE skills SET weight=weight+0.1, success_count=success_count+1 "
+            "WHERE skill_key=?", (sk,),
+        )
+        saved = 1
+    conn.commit()
+
+    logger.info(f"Success pattern ingested: {name}")
+    return ApiResponse(ok=True, data={"saved": saved})
