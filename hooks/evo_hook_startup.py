@@ -33,31 +33,46 @@ def format_startup_context(data):
     """Format batch context into a concise startup briefing."""
     lines = []
 
-    # Failures — highest priority
-    failures = data.get("failures", [])
-    if failures:
-        lines.append("## Known Failures (Avoid)")
-        for f in failures[:3]:
-            fix = f.get("fix_suggestion", "")
-            lines.append(f"- {f['error_type']}: {f['description'][:100]}")
-            if fix:
-                lines.append(f"  Fix: {fix[:80]}")
+    # Effect-based section guidance (same as evo_hook_context.py)
+    effect_recs = data.get("effect_recommendations", {})
+    deprioritize = {
+        s["section"] for s in effect_recs.get("deprioritize", [])
+        if s.get("lift", 0) < -0.1
+    }
+    skip_sections = {
+        s["section"] for s in effect_recs.get("deprioritize", [])
+        if s.get("lift", 0) < -0.3
+    }
 
-    # Skills
-    skills = data.get("skills", [])
-    if skills:
-        lines.append("## Relevant Skills")
-        for s in skills[:5]:
-            lines.append(f"- {s['name']} [{s['domain']}]: {s.get('pattern', '')[:80]}")
+    # Failures — highest priority
+    if "failures" not in skip_sections:
+        failures = data.get("failures", [])
+        if failures:
+            lines.append("## Known Failures (Avoid)")
+            for f in failures[:3]:
+                fix = f.get("fix_suggestion", "")
+                lines.append(f"- {f['error_type']}: {f['description'][:100]}")
+                if fix:
+                    lines.append(f"  Fix: {fix[:80]}")
+
+    # Skills — only if NOT strongly deprioritized
+    if "skills" not in skip_sections:
+        skills = data.get("skills", [])
+        skill_limit = 1 if "skills" in deprioritize else 5
+        if skills:
+            lines.append("## Relevant Skills")
+            for s in skills[:skill_limit]:
+                lines.append(f"- {s['name']} [{s['domain']}]: {s.get('pattern', '')[:80]}")
 
     # Memories
-    memories = data.get("memories", [])
-    if memories:
-        lines.append("## Past Memories")
-        for m in memories[:5]:
-            content = m.get("content", "")[:100]
-            cat = m.get("category", "")
-            lines.append(f"- [{cat}] {content}")
+    if "memories" not in skip_sections:
+        memories = data.get("memories", [])
+        if memories:
+            lines.append("## Past Memories")
+            for m in memories[:5]:
+                content = m.get("content", "")[:100]
+                cat = m.get("category", "")
+                lines.append(f"- [{cat}] {content}")
 
     # Briefing
     briefing = data.get("briefing", {})
@@ -67,12 +82,13 @@ def format_startup_context(data):
             lines.append(f"- {w[:100]}")
 
     # Best practices
-    best = data.get("best_practices", [])
-    if best:
-        lines.append("## Best Practices")
-        for bp in best[:3]:
-            pct = int(bp.get("ema_rate", 0) * 100)
-            lines.append(f"- [{bp.get('prompt_type', '')}] {bp.get('strategy', '')[:60]} ({pct}% success)")
+    if "best_practices" not in skip_sections:
+        best = data.get("best_practices", [])
+        if best:
+            lines.append("## Best Practices")
+            for bp in best[:3]:
+                pct = int(bp.get("ema_rate", 0) * 100)
+                lines.append(f"- [{bp.get('prompt_type', '')}] {bp.get('strategy', '')[:60]} ({pct}% success)")
 
     if not lines:
         return None
