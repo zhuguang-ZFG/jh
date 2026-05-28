@@ -43,6 +43,7 @@ EMA_SUCCESS_FACTOR = _float("EVO_EMA_SUCCESS", 1.05)
 EMA_FAILURE_FACTOR = _float("EVO_EMA_FAILURE", 0.9)
 EVIDENCE_MIN = _int("EVO_EVIDENCE_MIN", 3)
 PASS_RATE_MIN = _float("EVO_PASS_RATE_MIN", 0.8)
+AUTO_APPROVE_THRESHOLD = _float("EVO_AUTO_APPROVE_THRESHOLD", 0.8)
 
 # LLM integration (multi-backend, free-first)
 LLM_SYNC_ENABLED = os.getenv("LLM_SYNC_ENABLED", "true").lower() == "true"

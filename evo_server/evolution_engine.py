@@ -269,6 +269,68 @@ def save_proposals(proposals):
     return ids
 
 
+# ── Auto-approve high-confidence proposals ────────────────────────
+
+def auto_approve_and_apply() -> dict:
+    """Auto-approve proposals with confidence >= threshold, then apply them.
+
+    Called after save_proposals() in the weekly evolution cycle.
+    Returns stats: {approved, applied, failed}.
+    """
+    import uuid
+    conn = get_conn()
+    now = time.time()
+    threshold = config.AUTO_APPROVE_THRESHOLD
+
+    candidates = conn.execute(
+        "SELECT id, evo_key, category, summary, confidence FROM evolutions "
+        "WHERE status='proposed' AND confidence >= ? ORDER BY confidence DESC",
+        (threshold,),
+    ).fetchall()
+
+    if not candidates:
+        return {"approved": 0, "applied": 0, "failed": 0}
+
+    approved = 0
+    applied = 0
+    failed = 0
+
+    for row in candidates:
+        evo_id = row["id"]
+        # Approve
+        conn.execute(
+            "UPDATE evolutions SET status='approved', resolved_at=? WHERE id=?",
+            (now, evo_id),
+        )
+        conn.execute(
+            """INSERT INTO events (event_id, source, event_type, outcome, details, recorded_at)
+               VALUES (?, 'evolution_engine', 'evolution_auto_approve', 'approved', ?, ?)""",
+            (
+                str(uuid.uuid4())[:8],
+                json.dumps({
+                    "evo_id": evo_id,
+                    "category": row["category"],
+                    "confidence": row["confidence"],
+                    "summary": row["summary"][:100],
+                }),
+                now,
+            ),
+        )
+        approved += 1
+
+        # Apply
+        try:
+            action = apply_evolution(evo_id)
+            applied += 1
+            logger.info(f"Auto-applied evolution #{evo_id}: {action}")
+        except Exception as e:
+            failed += 1
+            logger.warning(f"Auto-apply failed for evolution #{evo_id}: {e}")
+
+    conn.commit()
+    return {"approved": approved, "applied": applied, "failed": failed}
+
+
 # ── Apply approved evolution ──────────────────────────────────────
 
 def apply_evolution(evo_id: int) -> str:
@@ -386,6 +448,10 @@ async def run_weekly_evolution() -> dict:
     saved_ids = save_proposals(proposals)
     logger.info(f"Saved {len(saved_ids)} proposals to DB")
 
+    # Auto-approve and apply high-confidence proposals
+    auto_result = auto_approve_and_apply()
+    logger.info(f"Auto-approve: {auto_result}")
+
     return {
         "sessions_analyzed": analysis["total"],
         "proposals_generated": len(proposals),
@@ -393,6 +459,8 @@ async def run_weekly_evolution() -> dict:
         "pass_rate": analysis.get("pass_rate", 0),
         "top_domains": analysis.get("top_domains", []),
         "source": "liMa" if lima_result["proposals"] else "rule_based",
+        "auto_approved": auto_result.get("approved", 0),
+        "auto_applied": auto_result.get("applied", 0),
     }
 
 
