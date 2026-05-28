@@ -364,6 +364,29 @@ def _init_fts_tables(conn: sqlite3.Connection):
 
     conn.commit()
 
+    # Create INSERT triggers to auto-sync FTS on content changes
+    # Note: DELETE on content= FTS tables doesn't work on older SQLite,
+    # so we rely on startup rebuild for deletions.
+    trigger_defs = [
+        ("skills", "skills_fts", ["name", "domain", "pattern"]),
+        ("patterns", "patterns_fts", ["name", "domain", "description"]),
+        ("failure_patterns", "failures_fts", ["error_type", "description", "fix_suggestion", "fix_code", "domain"]),
+        ("memories", "memories_fts", ["content", "domain", "category"]),
+    ]
+    for content_table, fts_table, columns in trigger_defs:
+        cols = ", ".join(columns)
+        new_cols = ", ".join(f"new.{c}" for c in columns)
+        try:
+            conn.execute(
+                f"CREATE TRIGGER IF NOT EXISTS {content_table}_fts_ai "
+                f"AFTER INSERT ON {content_table} BEGIN "
+                f"INSERT INTO {fts_table}(rowid, {cols}) VALUES (new.id, {new_cols}); END"
+            )
+        except Exception as e:
+            logger.debug(f"FTS trigger {content_table}_fts_ai: {e}")
+
+    conn.commit()
+
     # Initial rebuild
     from . import fts_sync
     try:
