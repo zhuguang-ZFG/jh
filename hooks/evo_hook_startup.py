@@ -104,7 +104,7 @@ def main():
     batch = api_post("/context/batch", {
         "task": task_hint,
         "limit": 5,
-        "include": ["skills", "patterns", "failures", "memories", "briefing", "best_practices"],
+        "include": ["skills", "patterns", "failures", "memories", "briefing", "best_practices", "predicted_risks"],
     })
 
     if not batch or not batch.get("ok"):

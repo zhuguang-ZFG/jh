@@ -4,9 +4,13 @@ Claude Code calls this to get context-aware suggestions before starting work.
 """
 import json
 import time
+import hashlib
+import asyncio as _asyncio
+import threading
+import logging
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 from .db import get_conn
 from .models import ApiResponse
 from .vec_search import vec_search
@@ -14,6 +18,7 @@ from .embedding import embed_text
 from .keywords import extract_keywords
 from . import config
 
+logger = logging.getLogger("evo.context")
 router = APIRouter(prefix="/context", tags=["context"])
 
 
@@ -147,6 +152,90 @@ class ContextBatchRequest(BaseModel):
 _batch_cache = {}  # {cache_key: {"ts": float, "data": dict}}
 _BATCH_CACHE_TTL = 60  # seconds
 
+# Predicted risks cache — separately managed from batch cache
+_predicted_risks_cache: Dict[str, Dict[str, Any]] = {}
+_RISK_CACHE_TTL = 600  # 10 minutes
+_RISK_CACHE_LOCK = threading.Lock()
+_MAX_RISK_CACHE = 200
+
+
+def _generate_predicted_risks_sync(
+    task: str, domain: str, failures: list
+) -> list:
+    """Generate predicted risks (sync, called from background thread).
+
+    Returns up to 3 items with {risk, prevention} fields.
+    Returns [] on any failure — never raises.
+    """
+    from .llm_bridge import chat
+
+    failures_text = ""
+    if failures:
+        for f in failures[:5]:
+            et = f.get("error_type", "?")
+            desc = f.get("description", "")[:100]
+            failures_text += f"- {et}: {desc}\n"
+    if not failures_text:
+        failures_text = "(none recorded)"
+
+    system = (
+        "You are a coding risk predictor. Given a specific task, domain, "
+        "and recent failure history, predict the top 3 most likely mistakes "
+        "the developer might make on THIS task. Focus on project-specific "
+        "pitfalls and failure patterns, not generic coding advice. "
+        "Each prediction must be actionable.\n\n"
+        "Return a JSON array only:\n"
+        '[{"risk": "one sentence describing the likely mistake", '
+        '"prevention": "one sentence on how to prevent it"}]\n'
+        "Max 3 items. No explanation outside JSON."
+    )
+
+    user_msg = (
+        f"Task: {task[:300]}\n"
+        f"Domain: {domain or 'general'}\n"
+        f"Recent failure patterns:\n{failures_text}\n"
+        "Predict the top 3 most likely mistakes for this task."
+    )
+
+    try:
+        response = _asyncio.run(
+            chat(user_msg, system=system, temperature=0.2, max_backends=3)
+        )
+    except Exception:
+        return []
+
+    if not response or response.startswith("Error:"):
+        return []
+
+    import re
+    try:
+        data = json.loads(response.strip())
+        if isinstance(data, list):
+            return [
+                {"risk": r.get("risk", "")[:120],
+                 "prevention": r.get("prevention", "")[:120]}
+                for r in data[:3]
+                if r.get("risk")
+            ]
+    except json.JSONDecodeError:
+        pass
+
+    match = re.search(r"\[.*\]", response, re.DOTALL)
+    if match:
+        try:
+            data = json.loads(match.group())
+            if isinstance(data, list):
+                return [
+                    {"risk": r.get("risk", "")[:120],
+                     "prevention": r.get("prevention", "")[:120]}
+                    for r in data[:3]
+                    if r.get("risk")
+                ]
+        except json.JSONDecodeError:
+            pass
+
+    return []
+
 
 @router.post("/batch")
 def batch_context(q: ContextBatchRequest):
@@ -162,7 +251,15 @@ def batch_context(q: ContextBatchRequest):
     now = time.time()
     cached = _batch_cache.get(cache_key)
     if cached and (now - cached["ts"]) < _BATCH_CACHE_TTL:
-        return ApiResponse(ok=True, data=cached["data"])
+        result_data = dict(cached["data"])
+        if "predicted_risks" in q.include and q.task:
+            task_hash = hashlib.md5(q.task.encode()).hexdigest()
+            with _RISK_CACHE_LOCK:
+                risk_cached = _predicted_risks_cache.get(task_hash)
+            if risk_cached and risk_cached.get("done") and \
+               (now - risk_cached["ts"]) < _RISK_CACHE_TTL:
+                result_data["predicted_risks"] = risk_cached["risks"]
+        return ApiResponse(ok=True, data=result_data)
 
     conn = get_conn()
     data = {}
@@ -292,8 +389,51 @@ def batch_context(q: ContextBatchRequest):
     except Exception:
         pass  # non-critical
 
-    # Update cache
-    _batch_cache[cache_key] = {"ts": now, "data": data}
+    # Predicted risks: background LLM generation with cache
+    if "predicted_risks" in q.include and q.task:
+        task_hash = hashlib.md5(q.task.encode()).hexdigest()
+        with _RISK_CACHE_LOCK:
+            cached_risk = _predicted_risks_cache.get(task_hash)
+
+        if cached_risk and cached_risk.get("done") and \
+           (now - cached_risk["ts"]) < _RISK_CACHE_TTL:
+            data["predicted_risks"] = cached_risk["risks"]
+        elif not cached_risk:
+            with _RISK_CACHE_LOCK:
+                _predicted_risks_cache[task_hash] = {
+                    "ts": now, "risks": [], "done": False}
+
+            failures_for_risk = data.get("failures", [])
+            domain_for_risk = q.domain or ""
+
+            def _bg_generate():
+                try:
+                    risks = _generate_predicted_risks_sync(
+                        q.task, domain_for_risk, failures_for_risk
+                    )
+                    with _RISK_CACHE_LOCK:
+                        _predicted_risks_cache[task_hash] = {
+                            "ts": time.time(), "risks": risks, "done": True}
+                        if len(_predicted_risks_cache) > _MAX_RISK_CACHE:
+                            oldest = sorted(
+                                _predicted_risks_cache.items(),
+                                key=lambda x: x[1]["ts"]
+                            )
+                            for k, v in oldest[:len(_predicted_risks_cache) // 4]:
+                                del _predicted_risks_cache[k]
+                    if risks:
+                        logger.info(
+                            "Predicted risks generated for task: %s", q.task[:50])
+                except Exception:
+                    with _RISK_CACHE_LOCK:
+                        _predicted_risks_cache[task_hash]["done"] = True
+
+            threading.Thread(target=_bg_generate, daemon=True).start()
+
+    # Update cache (exclude predicted_risks — separately managed)
+    data_for_cache = {
+        k: v for k, v in data.items() if k != "predicted_risks"}
+    _batch_cache[cache_key] = {"ts": now, "data": data_for_cache}
 
     return ApiResponse(ok=True, data=data)
 

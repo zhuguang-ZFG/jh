@@ -194,6 +194,19 @@ def format_context(all_data):
     """Format all context data into a concise injection string."""
     lines = []
 
+    # 0. Predicted risks (highest priority — LLM task-specific predictions)
+    predicted_risks = all_data.get("predicted_risks", [])
+    if predicted_risks:
+        lines.append("## [!] Predicted Risks for This Task")
+        for r in predicted_risks[:3]:
+            risk_text = r.get("risk", "")[:120]
+            prevention = r.get("prevention", "")[:120]
+            if risk_text:
+                lines.append("- **Risk**: {}".format(risk_text))
+                if prevention:
+                    lines.append("  **Prevent**: {}".format(prevention))
+        lines.append("")
+
     # 1. Failure warnings (HIGHEST PRIORITY — prevent repeated mistakes)
     failures = all_data.get("failures", [])
     if failures:
@@ -408,7 +421,8 @@ def main():
                 "domain": lang or "",
                 "limit": 5,
                 "include": ["skills", "patterns", "failures", "conventions",
-                           "git_patterns", "briefing", "best_practices", "memories"],
+                           "git_patterns", "briefing", "best_practices", "memories",
+                           "predicted_risks"],
             })
             if batch and batch.get("ok"):
                 all_data = batch.get("data", {})
