@@ -441,6 +441,80 @@ def extract_memories(transcript_data, changed_files, outcome, domain):
     return unique[:5]
 
 
+def generate_quality_snapshot(transcript_data, changed_files, git_diff, outcome, session_id):
+    """Generate quality metrics from session data for quality_snapshots table.
+
+    Returns (snapshot_dict, delta_dict) or (None, None) if insufficient data.
+    """
+    if not transcript_data and not changed_files:
+        return None, None
+
+    # Compute file-level metrics
+    file_metrics = {}
+    for fp in (changed_files or [])[:20]:
+        basename = os.path.basename(fp)
+        ext = fp.rsplit(".", 1)[-1] if "." in fp else ""
+        file_metrics[fp] = {
+            "language": ext,
+            "edited": True,
+        }
+
+    # Compute session-level quality score
+    score = 100 if outcome == "success" else (50 if outcome == "partial" else 0)
+
+    # Complexity proxy: more files + more edits = higher complexity
+    files_edited = len(set((transcript_data or {}).get("files_edited", [])))
+    edit_count = len((transcript_data or {}).get("edit_details", []))
+    write_count = len((transcript_data or {}).get("write_details", []))
+    complexity = min(files_edited * 2 + edit_count + write_count, 100)
+
+    # LOC delta from git diff
+    added = 0
+    removed = 0
+    if git_diff:
+        for line in git_diff.split("\n"):
+            if line.startswith("+") and not line.startswith("+++"):
+                added += 1
+            elif line.startswith("-") and not line.startswith("---"):
+                removed += 1
+
+    # Syntax errors from transcript
+    errors = (transcript_data or {}).get("errors_encountered", [])
+    syntax_errors = sum(1 for e in errors
+                        if isinstance(e, str) and any(k in e.lower()
+                            for k in ("syntaxerror", "syntax error", "indentationerror",
+                                      "taberror", "nameerror", "typeerror")))
+
+    # Tool efficiency: fewer tool calls for same result = better
+    total_tools = (transcript_data or {}).get("total_tool_calls", 0)
+    efficiency = max(0, 100 - total_tools) if total_tools > 0 else 50
+
+    snapshot = {
+        "score": score,
+        "files_changed": len(changed_files or []),
+        "complexity": complexity,
+        "efficiency": efficiency,
+        "loc_added": added,
+        "loc_removed": removed,
+    }
+
+    delta = {
+        "score_delta": score - 50,  # vs neutral baseline
+        "complexity_delta": complexity - 20,  # vs typical session
+        "loc_delta": added - removed,
+        "description": f"Session {session_id[:12]}: {outcome}, {files_edited} files, {edit_count} edits",
+        "summary": {
+            "quality_score": score,
+            "complexity_delta": complexity - 20,
+            "loc_delta": added - removed,
+            "syntax_errors_introduced": syntax_errors,
+            "total_tool_calls": total_tools,
+        },
+    }
+
+    return snapshot, delta
+
+
 def read_changed_files():
     """Read and return tracked changed files from temp file."""
     if os.path.exists(TRACKER_FILE):

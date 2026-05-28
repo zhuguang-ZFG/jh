@@ -15,7 +15,7 @@ import subprocess
 
 from evo_hook_common import (
     api, parse_transcript, infer_domain, extract_skills, extract_memories,
-    read_changed_files, flush_injections, TRACKER_FILE,
+    read_changed_files, flush_injections, generate_quality_snapshot, TRACKER_FILE,
 )
 
 
@@ -154,11 +154,26 @@ def main():
     # Flush accumulated injection data with real session_id
     injections_flushed = flush_injections(session_id)
 
+    # Generate and send quality snapshot (closes quality_snapshots gap)
+    snapshot, delta = generate_quality_snapshot(
+        transcript_data, changed_files, git_diff, outcome, session_id
+    )
+    quality_saved = False
+    if snapshot and delta:
+        quality_result = api("POST", "/quality/snapshot", {
+            "session_id": session_id,
+            "phase": "after",
+            "snapshot": snapshot,
+            "delta": delta,
+        })
+        quality_saved = quality_result.get("ok", False)
+
     if result.get("ok"):
         msg = (
             f"[evo] Session {session_id[:12]} logged "
             f"({outcome}, {len(changed_files)} files, "
-            f"{skills_saved} skills, {injections_flushed} injection)"
+            f"{skills_saved} skills, {injections_flushed} injection"
+            f"{', quality snapshot' if quality_saved else ''})"
         )
         print(msg, file=sys.stderr)
 
