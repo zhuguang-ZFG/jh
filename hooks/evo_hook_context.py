@@ -194,6 +194,32 @@ def format_context(all_data):
     """Format all context data into a concise injection string."""
     lines = []
 
+    # Effect-based section guidance
+    effect_recs = all_data.get("effect_recommendations", {})
+    deprioritize = {
+        s["section"] for s in effect_recs.get("deprioritize", [])
+        if s.get("lift", 0) < -0.1
+    }
+    # Strong negative lift → skip entirely
+    skip_sections = {
+        s["section"] for s in effect_recs.get("deprioritize", [])
+        if s.get("lift", 0) < -0.3
+    }
+    if effect_recs.get("data_available") and deprioritize:
+        deprior_list = ", ".join(
+            f"{s['section']}({s['lift']:+.1%})"
+            for s in effect_recs.get("deprioritize", [])
+            if s["section"] in deprioritize
+        )
+        lines.append("## [i] Context Effect Guidance")
+        lines.append(f"- Deprioritized (negative lift): {deprior_list}")
+        if skip_sections:
+            lines.append(
+                f"- Skipped sections (strong negative): "
+                f"{', '.join(sorted(skip_sections))}"
+            )
+        lines.append("")
+
     # 0. Predicted risks (highest priority — LLM task-specific predictions)
     predicted_risks = all_data.get("predicted_risks", [])
     if predicted_risks:
@@ -208,52 +234,58 @@ def format_context(all_data):
         lines.append("")
 
     # 1. Failure warnings (HIGHEST PRIORITY — prevent repeated mistakes)
-    failures = all_data.get("failures", [])
-    if failures:
-        lines.append("## [!] Avoid These Mistakes")
-        for f in failures[:3]:
-            lines.append(f"- **{f['error_type']}**: {f['description'][:120]}")
-            # Prefer concrete fix_code over generic fix_suggestion
-            fix = f.get("fix_code") or f.get("fix_suggestion", "")
-            if fix:
-                fix_type = f.get("fix_type", "")
-                label = f"Fix ({fix_type})" if fix_type else "Fix"
-                lines.append(f"  {label}: {fix[:120]}")
+    if "failures" not in skip_sections:
+        failures = all_data.get("failures", [])
+        if failures:
+            lines.append("## [!] Avoid These Mistakes")
+            for f in failures[:3]:
+                lines.append(f"- **{f['error_type']}**: {f['description'][:120]}")
+                fix = f.get("fix_code") or f.get("fix_suggestion", "")
+                if fix:
+                    fix_type = f.get("fix_type", "")
+                    label = f"Fix ({fix_type})" if fix_type else "Fix"
+                    lines.append(f"  {label}: {fix[:120]}")
 
     # 2. Code conventions (follow project style)
-    conventions = all_data.get("conventions", [])
-    if conventions:
-        lines.append("## Project Conventions")
-        for c in conventions[:4]:
-            lines.append(f"- [{c['category']}] {c['rule']}")
-            if c.get("example"):
-                lines.append(f"  Example: {c['example'][:80]}")
+    if "conventions" not in skip_sections:
+        conventions = all_data.get("conventions", [])
+        if conventions:
+            lines.append("## Project Conventions")
+            for c in conventions[:4]:
+                lines.append(f"- [{c['category']}] {c['rule']}")
+                if c.get("example"):
+                    lines.append(f"  Example: {c['example'][:80]}")
 
     # 3. Git patterns (this repo's patterns)
-    git_patterns = all_data.get("git_patterns", [])
-    if git_patterns:
-        lines.append("## Repository Patterns")
-        for g in git_patterns[:3]:
-            lines.append(f"- [{g['pattern_type']}] {g['description'][:120]}")
+    if "git_patterns" not in skip_sections:
+        git_patterns = all_data.get("git_patterns", [])
+        if git_patterns:
+            lines.append("## Repository Patterns")
+            for g in git_patterns[:3]:
+                lines.append(f"- [{g['pattern_type']}] {g['description'][:120]}")
 
     # 4. Skills & patterns (from learning)
-    skills = all_data.get("skills", [])
-    if skills:
-        lines.append("## Relevant Skills")
-        for s in skills[:3]:
-            lines.append(f"- **{s['name']}** [{s['domain']}]: {s.get('pattern', '')[:100]}")
-            if s.get("when_to_use"):
-                lines.append(f"  When: {s['when_to_use'][:100]}")
-            if s.get("anti_patterns"):
-                lines.append(f"  Avoid: {s['anti_patterns'][:100]}")
-            if s.get("code_example"):
-                lines.append(f"  Example: {s['code_example'][:120]}")
+    if "skills" not in skip_sections:
+        skills = all_data.get("skills", [])
+        # Soft-deprioritize: reduce count if negative lift
+        skill_limit = 1 if "skills" in deprioritize else 3
+        if skills:
+            lines.append("## Relevant Skills")
+            for s in skills[:skill_limit]:
+                lines.append(f"- **{s['name']}** [{s['domain']}]: {s.get('pattern', '')[:100]}")
+                if s.get("when_to_use"):
+                    lines.append(f"  When: {s['when_to_use'][:100]}")
+                if s.get("anti_patterns"):
+                    lines.append(f"  Avoid: {s['anti_patterns'][:100]}")
+                if s.get("code_example"):
+                    lines.append(f"  Example: {s['code_example'][:120]}")
 
-    patterns = all_data.get("patterns", [])
-    if patterns:
-        lines.append("## Learned Patterns")
-        for p in patterns[:3]:
-            lines.append(f"- **{p['name']}** [{p['domain']}]: {p.get('description', '')[:100]}")
+    if "patterns" not in skip_sections:
+        patterns = all_data.get("patterns", [])
+        if patterns:
+            lines.append("## Learned Patterns")
+            for p in patterns[:3]:
+                lines.append(f"- **{p['name']}** [{p['domain']}]: {p.get('description', '')[:100]}")
 
     # 5. Rules & tips
     rules = all_data.get("rules", [])
@@ -275,24 +307,26 @@ def format_context(all_data):
             lines.append(f"- {i[:120]}")
 
     # 6. Best practices (EMA-ranked strategies)
-    best_pracs = all_data.get("best_practices", [])
-    if best_pracs:
-        lines.append("## Best Practices")
-        for bp in best_pracs[:3]:
-            pct = int(bp.get("ema_rate", 0) * 100)
-            lines.append("- [%s] %s (%d%% success, %d uses)" % (
-                bp.get("prompt_type", ""), bp.get("strategy", "")[:80],
-                pct, bp.get("uses", 0)))
+    if "best_practices" not in skip_sections:
+        best_pracs = all_data.get("best_practices", [])
+        if best_pracs:
+            lines.append("## Best Practices")
+            for bp in best_pracs[:3]:
+                pct = int(bp.get("ema_rate", 0) * 100)
+                lines.append("- [%s] %s (%d%% success, %d uses)" % (
+                    bp.get("prompt_type", ""), bp.get("strategy", "")[:80],
+                    pct, bp.get("uses", 0)))
 
     # 7. Past memories (cross-session vectorized knowledge)
-    memories = all_data.get("memories", [])
-    if memories:
-        lines.append("## Past Memories")
-        for m in memories[:5]:
-            cat = m.get("category", "")
-            content = m.get("content", "")[:120]
-            conf = m.get("confidence", 0.5)
-            lines.append(f"- [{cat}] {content} (conf={conf:.1f})")
+    if "memories" not in skip_sections:
+        memories = all_data.get("memories", [])
+        if memories:
+            lines.append("## Past Memories")
+            for m in memories[:5]:
+                cat = m.get("category", "")
+                content = m.get("content", "")[:120]
+                conf = m.get("confidence", 0.5)
+                lines.append(f"- [{cat}] {content} (conf={conf:.1f})")
 
     # 8. Dependency-aware context
     deps = all_data.get("dependencies", {})
