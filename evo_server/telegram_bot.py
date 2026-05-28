@@ -97,12 +97,36 @@ async def send_inline_keyboard(chat_id, text, buttons):
     return r.json()
 
 
+async def _translate_to_chinese(text: str) -> str:
+    """Translate text to Chinese using free LLM backend. Returns original on failure."""
+    # Skip if already mostly Chinese
+    chinese_chars = sum(1 for c in text if '一' <= c <= '鿿')
+    if chinese_chars > len(text) * 0.3:
+        return text
+
+    try:
+        from .llm_bridge import chat
+        result = await chat(
+            f"Translate this to natural Chinese. Keep markdown formatting intact. "
+            f"Only return the translated text, no explanation:\n\n{text}",
+            system="You are a translator. Translate English to Chinese.",
+            temperature=0.1,
+            max_backends=3,
+        )
+        if result and not result.startswith("Error:") and len(result) > 10:
+            return result.strip()
+    except Exception:
+        pass
+    return text
+
+
 async def send_notification(text: str):
-    """Fire-and-forget notification to owner."""
+    """Fire-and-forget notification to owner. Auto-translates to Chinese."""
     if not config.TELEGRAM_OWNER_ID or not config.TELEGRAM_BOT_TOKEN:
         return
     try:
-        await send_message(config.TELEGRAM_OWNER_ID, text)
+        translated = await _translate_to_chinese(text)
+        await send_message(config.TELEGRAM_OWNER_ID, translated)
     except Exception as e:
         logger.warning(f"Notification failed: {e}")
 
