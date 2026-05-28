@@ -840,9 +840,9 @@ async def run_cross_session_discovery() -> dict:
                     conn.execute(
                         """INSERT INTO failure_patterns
                            (pattern_key, error_type, description, fix_suggestion,
-                            domain, occurrences, confidence, created_at, last_seen)
-                           VALUES (?, ?, ?, ?, 'general', 1, ?, ?, ?)""",
-                        (key, title, desc, rec, confidence, now, now),
+                            domain, occurrences, created_at, last_seen)
+                           VALUES (?, ?, ?, ?, 'general', 1, ?, ?)""",
+                        (key, title, desc, rec, now, now),
                     )
                     stored += 1
                 except conn.IntegrityError:
