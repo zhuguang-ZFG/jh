@@ -685,3 +685,208 @@ async def run_llm_skill_refinement() -> dict:
     }
     logger.info("Skill refinement: %s", result)
     return result
+
+
+# ── Cross-session pattern discovery ────────────────────────────
+
+
+async def run_cross_session_discovery() -> dict:
+    """Analyze recent sessions with LLM to find hidden cross-session patterns.
+
+    Discovers patterns invisible to single-session analysis:
+    - Recurring failure combinations
+    - Success patterns that emerge across sessions
+    - Workflow improvements
+    - File change correlations
+
+    Returns: {status, discoveries, sessions_analyzed, domains}
+    """
+    conn = get_conn()
+    cutoff = time.time() - 7 * 86400  # last 7 days
+
+    # Fetch recent sessions
+    sessions = conn.execute(
+        """SELECT session_id, goal, outcome, lessons, created_at
+           FROM sessions WHERE created_at > ?
+           ORDER BY created_at DESC LIMIT 30""",
+        (cutoff,),
+    ).fetchall()
+
+    if len(sessions) < 5:
+        return {
+            "status": "skipped",
+            "reason": "not_enough_sessions",
+            "discoveries": [],
+            "sessions_analyzed": len(sessions),
+        }
+
+    # Fetch failure patterns
+    failures = conn.execute(
+        """SELECT error_type, description, domain, occurrences
+           FROM failure_patterns WHERE occurrences >= 2
+           ORDER BY occurrences DESC LIMIT 20"""
+    ).fetchall()
+
+    # Fetch existing top skills
+    skills = conn.execute(
+        "SELECT name, domain FROM skills WHERE weight > 0.5 ORDER BY weight DESC LIMIT 15"
+    ).fetchall()
+
+    # Build session summary
+    session_lines = []
+    for s in sessions:
+        outcome_symbol = "+" if s["outcome"] == "success" else (
+            "-" if s["outcome"] == "failure" else "~")
+        goal = (s["goal"] or "unknown")[:100]
+        lessons = (s["lessons"] or "")[:120]
+        session_lines.append(
+            f"[{outcome_symbol}] {goal} -- {lessons}"
+        )
+
+    failure_lines = []
+    for f in failures:
+        failure_lines.append(
+            f"- {f['error_type']}[{f['domain'] or 'general'}]: "
+            f"{f['description'][:120]} ({f['occurrences']}x)"
+        )
+
+    skill_names = ", ".join(
+        f"{s['name']}[{s['domain']}]" for s in skills[:10]
+    ) or "(none)"
+
+    # Build prompt
+    system = (
+        "Analyze programming session data and find HIDDEN PATTERNS that only "
+        "emerge across multiple sessions. Focus on patterns a developer would "
+        "NOT notice from a single session.\n\n"
+        "Return a JSON array of discoveries, each with:\n"
+        '- type: "risk_pattern" | "success_pattern" | "workflow_improvement" | "dependency_issue"\n'
+        '- title: short descriptive name\n'
+        '- description: what was observed across sessions\n'
+        '- recommendation: what to do differently\n'
+        '- confidence: 0.0-1.0\n'
+        '- affected_files: [] (if any file pattern detected, else empty array)\n\n'
+        "Only report patterns with evidence from 3+ sessions. Max 5 discoveries.\n"
+        "Return ONLY the JSON array, no other text."
+    )
+
+    domain_counts = {}
+    for s in sessions:
+        d = "general"
+        goal_lower = (s["goal"] or "").lower()
+        for kw_dom in ("python", "api", "rust", "go", "devops", "test", "frontend", "js"):
+            if kw_dom in goal_lower:
+                d = kw_dom
+                break
+        domain_counts[d] = domain_counts.get(d, 0) + 1
+    domains_text = ", ".join(
+        f"{d}({c})" for d, c in
+        sorted(domain_counts.items(), key=lambda x: -x[1])[:5]
+    )
+
+    user_msg = (
+        f"Sessions in last 7 days ({len(sessions)} total):\n"
+        + "\n".join(session_lines) + "\n\n"
+        f"Top domains: {domains_text}\n\n"
+        f"Top failure patterns:\n"
+        + ("\n".join(failure_lines) if failure_lines else "(none)") + "\n\n"
+        f"Top skills: {skill_names}\n\n"
+        "Discover cross-session patterns."
+    )
+
+    discoveries = []
+    try:
+        from .llm_bridge import chat
+        response = await chat(
+            user_msg, system=system, temperature=0.3, max_backends=5
+        )
+
+        if response and not response.startswith("Error:"):
+            try:
+                data = json.loads(response.strip())
+                if isinstance(data, list):
+                    discoveries = data
+            except json.JSONDecodeError:
+                import re
+                match = re.search(r"\[.*\]", response, re.DOTALL)
+                if match:
+                    try:
+                        data = json.loads(match.group())
+                        if isinstance(data, list):
+                            discoveries = data
+                    except json.JSONDecodeError:
+                        pass
+    except Exception as e:
+        logger.warning(f"Cross-session discovery LLM failed: {e}")
+
+    # Store discoveries
+    stored = 0
+    for d in discoveries[:5]:
+        d_type = d.get("type", "risk_pattern")
+        title = d.get("title", "discovered_pattern")[:100]
+        desc = d.get("description", "")[:300]
+        rec = d.get("recommendation", "")[:200]
+        confidence = min(max(d.get("confidence", 0.5), 0.0), 1.0)
+        affected = d.get("affected_files", [])
+
+        now = time.time()
+        try:
+            if d_type in ("risk_pattern", "dependency_issue"):
+                # Store as failure_pattern for prevention
+                key = hashlib.sha256(
+                    f"{title}:{desc[:80]}".encode()
+                ).hexdigest()[:16]
+                try:
+                    conn.execute(
+                        """INSERT INTO failure_patterns
+                           (pattern_key, error_type, description, fix_suggestion,
+                            domain, occurrences, confidence, created_at, last_seen)
+                           VALUES (?, ?, ?, ?, 'general', 1, ?, ?, ?)""",
+                        (key, title, desc, rec, confidence, now, now),
+                    )
+                    stored += 1
+                except conn.IntegrityError:
+                    pass
+            else:
+                # Store as skill
+                sk = hashlib.sha256(
+                    f"{title}:general:{desc[:80]}".encode()
+                ).hexdigest()[:16]
+                try:
+                    conn.execute(
+                        """INSERT INTO skills
+                           (skill_key, name, domain, pattern, when_to_use, weight,
+                            use_count, success_count, created_at, last_used, source)
+                           VALUES (?, ?, 'general', ?, ?, ?, 0, 0, ?, 0, 'cross_session')""",
+                        (sk, title, desc, rec, confidence, now),
+                    )
+                    stored += 1
+                except conn.IntegrityError:
+                    pass
+        except Exception as e:
+            logger.warning(f"Failed to store discovery '{title}': {e}")
+
+    if stored:
+        conn.commit()
+        # Sync vec+fts for new skills
+        try:
+            from . import fts_sync
+            fts_sync.rebuild_fts(conn, "skills")
+        except Exception:
+            pass
+        try:
+            from . import vec_sync
+            vec_sync.rebuild_all_embeddings(conn)
+        except Exception:
+            pass
+
+    result = {
+        "status": "done" if stored else "no_discoveries",
+        "discoveries": discoveries[:5],
+        "stored": stored,
+        "sessions_analyzed": len(sessions),
+        "domains": domains_text,
+    }
+    logger.info(f"Cross-session discovery: {stored} stored from "
+                f"{len(sessions)} sessions ({domains_text})")
+    return result

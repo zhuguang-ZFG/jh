@@ -79,6 +79,12 @@ def _start_scheduler():
                 id="llm_sync",
             )
 
+        # Cross-session discovery: 04:00 UTC (12:00 CST), daily
+        _scheduler.add_job(
+            _run_cross_session_job, "cron", hour=4, minute=0,
+            id="cross_session_discovery",
+        )
+
         # GitHub learning: 02:00 UTC (10:00 CST), daily
         _scheduler.add_job(
             _run_learning_job, "cron", hour=2, minute=30,
@@ -362,6 +368,46 @@ def _run_effect_analysis_job():
         )
     except Exception as e:
         logger.error(f"Effect analysis failed: {e}")
+
+
+def _run_cross_session_job():
+    """Cross-session discovery — LLM finds hidden patterns across sessions."""
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(_async_cross_session())
+        else:
+            loop.run_until_complete(_async_cross_session())
+    except RuntimeError:
+        asyncio.run(_async_cross_session())
+
+
+async def _async_cross_session():
+    from .evolution_engine import run_cross_session_discovery
+    from .telegram_bot import send_notification
+    try:
+        result = await run_cross_session_discovery()
+        status = result.get("status", "unknown")
+        if status == "done":
+            discoveries = result.get("discoveries", [])
+            types = set(d.get("type", "?") for d in discoveries)
+            msg = (
+                f"🔍 *Cross-Session Discovery*\n"
+                f"Sessions analyzed: {result['sessions_analyzed']}\n"
+                f"Domains: {result.get('domains', 'unknown')}\n"
+                f"Patterns found: {result['stored']} ({', '.join(types)})\n"
+            )
+            for d in discoveries[:3]:
+                msg += f"\n• *{d.get('title', '?')}*: {d.get('recommendation', '')[:100]}"
+            await send_notification(msg)
+        elif status == "skipped":
+            logger.info("Cross-session discovery skipped: %s",
+                       result.get("reason"))
+        else:
+            logger.info("Cross-session discovery: %s", status)
+    except Exception as e:
+        logger.error(f"Cross-session discovery failed: {e}")
 
 
 app = FastAPI(title="Evo-Server", version="0.1.0", lifespan=lifespan)
