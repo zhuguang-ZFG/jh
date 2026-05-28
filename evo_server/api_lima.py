@@ -89,3 +89,11 @@ def export_knowledge():
     """Export evo-server knowledge for LLM context."""
     from .llm_bridge import export_evo_knowledge
     return ApiResponse(ok=True, data=export_evo_knowledge())
+
+
+@router.post("/discover")
+async def trigger_discovery():
+    """Manually trigger cross-session pattern discovery."""
+    from .evolution_engine import run_cross_session_discovery
+    result = await run_cross_session_discovery()
+    return ApiResponse(ok=True, data=result)
