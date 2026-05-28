@@ -129,7 +129,8 @@ def embed_for_storage(text: str) -> Optional[bytes]:
 
 
 def build_search_text(name: str, domain: str, description: str = "",
-                      pattern: str = "", extra: str = "") -> str:
+                      pattern: str = "", extra: str = "",
+                      code_example: str = "") -> str:
     """Build a rich text representation for embedding from structured fields.
 
     Combines fields into a meaningful search text for semantic matching.
@@ -143,6 +144,9 @@ def build_search_text(name: str, domain: str, description: str = "",
         parts.append(description)
     if pattern:
         parts.append(pattern)
+    if code_example:
+        # Truncate code_example for embedding (keep key structure, not full body)
+        parts.append(code_example[:300])
     if extra:
         parts.append(extra)
     return " ".join(parts)

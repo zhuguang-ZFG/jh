@@ -98,17 +98,9 @@ def _detect_language(filepath: str) -> str:
 def _extract_from_content(content: str, language: str, filepath: str) -> List[Dict]:
     """Extract patterns from code content using AST-lite scanning."""
     try:
-        # Import from learning module (same repo, different package)
-        import sys
-        import os
-        # Add parent dir to path for learning module access
-        parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        learning_path = os.path.join(parent, "learning")
-        if os.path.isdir(learning_path) and parent not in sys.path:
-            sys.path.insert(0, parent)
-        from learning.pattern_extractor import extract_patterns
+        from .learning.pattern_extractor import extract_patterns
         patterns = extract_patterns(content, language, filepath)
-    except ImportError:
+    except (ImportError, Exception):
         # Fallback: basic extraction
         patterns = _basic_extract(content, language, filepath)
 

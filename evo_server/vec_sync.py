@@ -67,6 +67,7 @@ def _rebuild_table(conn: sqlite3.Connection, content_table: str, config: dict):
             description=rd.get("description", rd.get("pattern", "")),
             pattern=rd.get("pattern", ""),
             extra=rd.get("error_type", "") + " " + rd.get("fix_suggestion", ""),
+            code_example=rd.get("code_example", ""),
         )
         texts.append(text)
 
@@ -119,6 +120,7 @@ def sync_row_embedding(conn: sqlite3.Connection, content_table: str,
         description=row_data.get("description", row_data.get("pattern", "")),
         pattern=row_data.get("pattern", ""),
         extra=row_data.get("error_type", "") + " " + row_data.get("fix_suggestion", ""),
+        code_example=row_data.get("code_example", ""),
     )
 
     from .embedding import embed_text
