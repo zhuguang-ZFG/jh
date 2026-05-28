@@ -274,6 +274,15 @@ def batch_context(q: ContextBatchRequest):
             for m in memories
         ]
 
+    # Effect-based recommendations: which sections have positive/negative lift
+    try:
+        from .effect_tracker import get_effective_sections
+        recs = get_effective_sections(conn)
+        if recs.get("data_available"):
+            data["effect_recommendations"] = recs
+    except Exception:
+        pass  # non-critical
+
     # Update cache
     _batch_cache[cache_key] = {"ts": now, "data": data}
 
@@ -326,6 +335,18 @@ def get_effect_metrics():
     conn = get_conn()
     metrics = compute_effect_metrics(conn)
     return ApiResponse(ok=True, data=metrics)
+
+
+@router.get("/effect-recommendations")
+def get_effect_recommendations():
+    """Return section recommendations based on effect metrics.
+
+    Which sections to prioritize (positive lift) vs deprioritize (negative lift).
+    """
+    from .effect_tracker import get_effective_sections
+    conn = get_conn()
+    recs = get_effective_sections(conn)
+    return ApiResponse(ok=True, data=recs)
 
 
 # ── Helpers ───────────────────────────────────────────────────

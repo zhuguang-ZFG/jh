@@ -150,6 +150,52 @@ def _compute_fix_impact(conn, cutoff: float) -> Dict:
     }
 
 
+def get_effective_sections(conn) -> Dict:
+    """Get section recommendations based on effect metrics.
+
+    Returns which sections have positive lift and should be prioritized,
+    and which have negative lift and should be deprioritized.
+    """
+    now = time.time()
+    cutoff_30d = now - 30 * 86400
+
+    # Read latest effect_metrics
+    row = conn.execute(
+        "SELECT top_sections, lift FROM effect_metrics ORDER BY metric_date DESC LIMIT 1"
+    ).fetchone()
+
+    if not row:
+        return {"prioritize": [], "deprioritize": [], "overall_lift": 0, "data_available": False}
+
+    try:
+        sections = json.loads(row["top_sections"])
+    except Exception:
+        sections = {}
+
+    prioritize = []
+    deprioritize = []
+
+    for section, stats in sections.items():
+        lift = stats.get("lift_vs_baseline", 0)
+        sessions = stats.get("sessions", 0)
+        if sessions < 2:
+            continue  # not enough data
+        if lift > 0.05:
+            prioritize.append({"section": section, "lift": lift, "sessions": sessions})
+        elif lift < -0.05:
+            deprioritize.append({"section": section, "lift": lift, "sessions": sessions})
+
+    prioritize.sort(key=lambda x: x["lift"], reverse=True)
+    deprioritize.sort(key=lambda x: x["lift"])
+
+    return {
+        "prioritize": prioritize,
+        "deprioritize": deprioritize,
+        "overall_lift": row["lift"],
+        "data_available": True,
+    }
+
+
 def run_daily_effect_analysis(conn) -> Dict:
     """Run daily and store aggregated metrics."""
     metrics = compute_effect_metrics(conn)
