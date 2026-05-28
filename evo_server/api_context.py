@@ -283,6 +283,15 @@ def batch_context(q: ContextBatchRequest):
     except Exception:
         pass  # non-critical
 
+    # Quality health: trend assessment and recommendations
+    try:
+        from .quality_trends import get_quality_health as _get_qh
+        health = _get_qh()
+        if health.get("status") != "insufficient_data":
+            data["quality_health"] = health
+    except Exception:
+        pass  # non-critical
+
     # Update cache
     _batch_cache[cache_key] = {"ts": now, "data": data}
 
@@ -347,6 +356,17 @@ def get_effect_recommendations():
     conn = get_conn()
     recs = get_effective_sections(conn)
     return ApiResponse(ok=True, data=recs)
+
+
+@router.get("/quality-health")
+def get_quality_health():
+    """Return quality health assessment from weekly trends.
+
+    Includes status (improving/declining/stable), trend data, and recommendations.
+    """
+    from .quality_trends import get_quality_health as _get
+    health = _get()
+    return ApiResponse(ok=True, data=health)
 
 
 # ── Helpers ───────────────────────────────────────────────────

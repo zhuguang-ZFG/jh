@@ -123,6 +123,86 @@ def get_quality_trend(weeks: int = 4) -> list:
     return [dict(r) for r in rows]
 
 
+def get_quality_health() -> dict:
+    """Assess quality health from weekly trends.
+
+    Returns:
+    - status: "improving", "declining", "stable", or "insufficient_data"
+    - score_trend: list of recent scores
+    - rate_trend: list of recent success rates
+    - recommendations: list of actionable suggestions
+    """
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT week_start, avg_score, total_sessions, success_rate, "
+        "top_regressions FROM quality_weekly ORDER BY created_at DESC LIMIT 4"
+    ).fetchall()
+
+    if len(rows) < 2:
+        return {
+            "status": "insufficient_data",
+            "weeks_available": len(rows),
+            "recommendations": ["Need at least 2 weeks of data for trend analysis"],
+        }
+
+    scores = [r["avg_score"] for r in rows]
+    rates = [r["success_rate"] for r in rows]
+
+    # Compute trend direction (simple: compare last 2 weeks)
+    score_delta = scores[0] - scores[1]
+    rate_delta = rates[0] - rates[1]
+
+    # Determine status
+    if score_delta > 5 and rate_delta > 0.05:
+        status = "improving"
+    elif score_delta < -5 and rate_delta < -0.05:
+        status = "declining"
+    else:
+        status = "stable"
+
+    # Generate recommendations
+    recs = []
+
+    if status == "declining":
+        recs.append("Quality declining — consider running evolution cycle to identify root causes")
+        # Check if regressions are accumulating
+        all_regressions = []
+        for r in rows[:2]:
+            try:
+                regs = json.loads(r["top_regressions"])
+                all_regressions.extend(regs)
+            except Exception:
+                pass
+        if len(all_regressions) >= 3:
+            recs.append(f"Multiple regressions detected ({len(all_regressions)}) — review failure patterns")
+
+    if status == "improving":
+        recs.append("Quality improving — current approach is working, continue monitoring")
+
+    # Check for low success rate
+    if rates[0] < 0.6:
+        recs.append(f"Success rate {rates[0]:.0%} is below 60% — review failure patterns and inject more context")
+
+    # Check for sparse weeks
+    if rows[0]["total_sessions"] < 3:
+        recs.append("Low session count this week — results may not be statistically significant")
+
+    if not recs:
+        recs.append("Quality stable — no action needed")
+
+    return {
+        "status": status,
+        "current_week": rows[0]["week_start"],
+        "current_score": scores[0],
+        "current_rate": rates[0],
+        "score_delta": round(score_delta, 1),
+        "rate_delta": round(rate_delta, 3),
+        "score_trend": [round(s, 1) for s in scores],
+        "rate_trend": [round(r, 3) for r in rates],
+        "recommendations": recs,
+    }
+
+
 def format_quality_report(trend: list) -> str:
     """Format quality trend into a readable Telegram message."""
     if not trend:
