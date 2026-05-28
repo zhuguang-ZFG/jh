@@ -410,7 +410,7 @@ async def _async_cross_session():
         logger.error(f"Cross-session discovery failed: {e}")
 
 
-app = FastAPI(title="Evo-Server", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Evo-Server", version="0.2.0", lifespan=lifespan)
 
 # --- API key middleware ---
 EXEMPT_PATHS = {"/health", "/stats", "/docs", "/openapi.json", "/telegram/webhook"}
