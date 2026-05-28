@@ -347,3 +347,134 @@ def build_embed_text(row: dict, text_fields: List[str]) -> str:
         if val:
             parts.append(str(val))
     return " ".join(parts)
+
+
+def deduplicate_skills(conn, similarity_threshold: float = 0.9) -> dict:
+    """Find and merge semantically duplicate skills using embedding similarity.
+
+    For each skill, finds other skills with cosine similarity > threshold.
+    Merges duplicates: keeps higher-weight skill, merges patterns/code_examples.
+
+    Returns: {merged: int, examined: int, errors: int}
+    """
+    config = VEC_TABLES.get("skills")
+    if not config:
+        return {"merged": 0, "examined": 0, "errors": 0, "reason": "no vec table config"}
+
+    vec_table = config["vec_table"]
+
+    # Check if vec table exists
+    try:
+        conn.execute(f"SELECT COUNT(*) FROM {vec_table}").fetchone()
+    except Exception:
+        return {"merged": 0, "examined": 0, "errors": 0, "reason": "vec table not available"}
+
+    # Get all skills with embeddings
+    skills = conn.execute(
+        "SELECT id, skill_key, name, domain, pattern, weight, use_count, "
+        "success_count, code_example, when_to_use, anti_patterns FROM skills ORDER BY id"
+    ).fetchall()
+
+    if len(skills) < 2:
+        return {"merged": 0, "examined": len(skills), "errors": 0}
+
+    examined = 0
+    merged = 0
+    errors = 0
+    deleted_ids = set()
+
+    for skill in skills:
+        sid = skill["id"]
+        if sid in deleted_ids:
+            continue
+
+        examined += 1
+
+        # Find similar skills via vec0
+        try:
+            rows = conn.execute(
+                f"""SELECT id, (1.0 - distance / 2.0) AS similarity
+                    FROM (
+                        SELECT id, vec_distance_cosine(embedding,
+                            (SELECT embedding FROM {vec_table} WHERE id = :sid)) AS distance
+                        FROM {vec_table}
+                        WHERE id != :sid
+                        ORDER BY distance
+                        LIMIT 10
+                    )
+                    WHERE similarity >= :threshold""",
+                {"sid": sid, "threshold": similarity_threshold},
+            ).fetchall()
+        except Exception as e:
+            logger.debug(f"Dedup vec query failed for skill {sid}: {e}")
+            errors += 1
+            continue
+
+        if not rows:
+            continue
+
+        # Merge each duplicate into this skill
+        for dup_row in rows:
+            dup_id = dup_row["id"]
+            if dup_id in deleted_ids:
+                continue
+
+            dup = conn.execute("SELECT * FROM skills WHERE id=?", (dup_id,)).fetchone()
+            if not dup:
+                continue
+
+            # Merge: keep higher-weight skill as primary
+            if dup["weight"] > skill["weight"]:
+                # Swap — dup becomes primary
+                skill, dup = dup, skill
+                sid = skill["id"]
+
+            # Merge patterns
+            merged_pattern = skill["pattern"]
+            if dup["pattern"] and dup["pattern"] not in merged_pattern:
+                merged_pattern = f"{merged_pattern} | {dup['pattern'][:100]}"
+
+            # Merge code_examples
+            merged_example = skill["code_example"] or ""
+            if dup["code_example"] and dup["code_example"] not in merged_example:
+                merged_example = f"{merged_example}\n{dup['code_example'][:200]}" if merged_example else dup["code_example"][:200]
+
+            # Merge when_to_use
+            merged_when = skill["when_to_use"] or ""
+            if dup["when_to_use"] and dup["when_to_use"] not in merged_when:
+                merged_when = f"{merged_when}; {dup['when_to_use'][:100]}" if merged_when else dup["when_to_use"][:100]
+
+            # Update primary skill
+            conn.execute(
+                "UPDATE skills SET pattern=?, code_example=?, when_to_use=?, "
+                "weight=MAX(weight, ?), use_count=use_count+?, "
+                "success_count=success_count+? WHERE id=?",
+                (
+                    merged_pattern[:500],
+                    merged_example[:500],
+                    merged_when[:300],
+                    dup["weight"],
+                    dup["use_count"],
+                    dup["success_count"],
+                    sid,
+                ),
+            )
+
+            # Delete duplicate from content table AND vec table
+            conn.execute("DELETE FROM skills WHERE id=?", (dup_id,))
+            conn.execute(f"DELETE FROM {vec_table} WHERE id=?", (dup_id,))
+            deleted_ids.add(dup_id)
+            merged += 1
+
+            logger.info(f"Merged skill {dup_id} ({dup['name']}) into {sid} ({skill['name']})")
+
+    if merged:
+        conn.commit()
+        # Rebuild FTS after merge
+        try:
+            from . import fts_sync
+            fts_sync.rebuild_fts(conn, "skills")
+        except Exception:
+            pass
+
+    return {"merged": merged, "examined": examined, "errors": errors}
