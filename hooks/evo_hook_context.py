@@ -347,6 +347,12 @@ def _accumulate_injection(all_data, domain):
     if not sections:
         return
 
+    # Collect skill_keys for auto weight feedback
+    skill_keys = [
+        s.get("skill_key", "") for s in all_data.get("skills", [])
+        if s.get("skill_key")
+    ]
+
     try:
         # Add parent dir to path for evo_hook_common import
         parent = os.path.dirname(os.path.abspath(__file__))
@@ -360,6 +366,7 @@ def _accumulate_injection(all_data, domain):
             pattern_count=pattern_count,
             has_fix_code=has_fix_code,
             domain=domain or "",
+            skill_keys=skill_keys,
         )
     except ImportError:
         pass  # evo_hook_common not available

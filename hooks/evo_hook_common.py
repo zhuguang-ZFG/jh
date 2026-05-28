@@ -477,7 +477,8 @@ INJECTION_DEBOUNCE = 300  # seconds between injections
 
 
 def record_injection(sections, failure_count=0, skill_count=0,
-                     pattern_count=0, has_fix_code=False, domain=""):
+                     pattern_count=0, has_fix_code=False, domain="",
+                     skill_keys=None):
     """Accumulate injection data in a temp file. Called by context hooks.
 
     Data is flushed with the real session_id when the Stop hook fires.
@@ -505,6 +506,7 @@ def record_injection(sections, failure_count=0, skill_count=0,
         "pattern_count": pattern_count,
         "has_fix_code": has_fix_code,
         "domain": domain,
+        "skill_keys": skill_keys or [],
         "ts": now,
     })
 
@@ -540,6 +542,7 @@ def flush_injections(real_session_id):
     total_patterns = 0
     any_fix_code = False
     domain = ""
+    all_skill_keys = []
 
     for entry in data:
         all_sections.update(entry.get("sections", []))
@@ -550,6 +553,9 @@ def flush_injections(real_session_id):
             any_fix_code = True
         if entry.get("domain") and not domain:
             domain = entry["domain"]
+        for sk in entry.get("skill_keys", []):
+            if sk not in all_skill_keys:
+                all_skill_keys.append(sk)
 
     result = api("POST", "/context/log-injection", {
         "session_id": real_session_id,
@@ -559,6 +565,7 @@ def flush_injections(real_session_id):
         "pattern_count": min(total_patterns, 50),
         "has_fix_code": any_fix_code,
         "domain": domain,
+        "skill_keys": all_skill_keys[:50],
     })
 
     # Clean up

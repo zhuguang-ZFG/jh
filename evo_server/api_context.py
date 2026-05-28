@@ -290,6 +290,7 @@ class InjectionLogRequest(BaseModel):
     pattern_count: int = 0
     has_fix_code: bool = False
     domain: str = ""
+    skill_keys: List[str] = Field(default_factory=list, description="skill_key values of injected skills")
 
 
 @router.post("/log-injection")
@@ -300,8 +301,8 @@ def log_injection(req: InjectionLogRequest):
     conn.execute(
         """INSERT INTO context_injections
            (session_id, sections, failure_count, skill_count, pattern_count,
-            has_fix_code, domain, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            has_fix_code, domain, skill_keys, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             req.session_id,
             json.dumps(req.sections),
@@ -310,6 +311,7 @@ def log_injection(req: InjectionLogRequest):
             req.pattern_count,
             1 if req.has_fix_code else 0,
             req.domain,
+            json.dumps(req.skill_keys),
             now,
         ),
     )
@@ -357,6 +359,7 @@ def _extract_keywords(text):
 def _format_skill(row):
     r = dict(row)
     result = {
+        "skill_key": r.get("skill_key", ""),
         "name": r["name"],
         "domain": r["domain"],
         "weight": round(r.get("weight", 1.0), 2),

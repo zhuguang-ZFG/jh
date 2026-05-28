@@ -302,6 +302,12 @@ def get_conn() -> sqlite3.Connection:
             except Exception:
                 pass
 
+        # Phase 4: skill_keys on context_injections (auto weight feedback)
+        try:
+            _conn.execute("ALTER TABLE context_injections ADD COLUMN skill_keys TEXT DEFAULT '[]'")
+        except Exception:
+            pass
+
         # Load sqlite-vec extension + create vec tables
         _init_vec_tables(_conn)
         # Create FTS5 tables for BM25 search

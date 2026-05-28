@@ -62,8 +62,12 @@ def log_session(s: SessionLog):
             import logging
             logging.getLogger("evo.session").warning(f"Skill extraction from diff failed: {e}")
 
+    # Phase 4: Auto-update skill weights based on session outcome
+    updated_skills = _auto_update_weights(conn, s.session_id, s.outcome, now)
+
     return ApiResponse(ok=True, message="Session logged", data={
         "skills_extracted": len(extracted_skills),
+        "skills_weight_updated": updated_skills,
     })
 
 
@@ -285,3 +289,61 @@ def _save_extracted_skills(conn, skills, now):
                 })
     except Exception:
         pass
+
+
+def _auto_update_weights(conn, session_id, outcome, now):
+    """Auto-update EMA weights for skills injected in this session.
+
+    Looks up context_injection.skill_keys for the session, then applies:
+    - success/partial: weight *= EMA_SUCCESS_FACTOR (1.05)
+    - failure: weight *= EMA_FAILURE_FACTOR (0.9)
+    - Skills with weight < 0.1 are evicted.
+
+    Returns number of skills updated.
+    """
+    if outcome not in ("success", "failure", "partial"):
+        return 0
+
+    # Find context injection for this session
+    row = conn.execute(
+        "SELECT skill_keys FROM context_injections WHERE session_id=? ORDER BY created_at DESC LIMIT 1",
+        (session_id,),
+    ).fetchone()
+    if not row or not row["skill_keys"]:
+        return 0
+
+    try:
+        skill_keys = json.loads(row["skill_keys"])
+    except Exception:
+        return 0
+
+    if not skill_keys:
+        return 0
+
+    is_success = outcome in ("success", "partial")
+    factor = config.EMA_SUCCESS_FACTOR if is_success else config.EMA_FAILURE_FACTOR
+    updated = 0
+
+    for sk in skill_keys:
+        if not sk:
+            continue
+        skill = conn.execute(
+            "SELECT id, weight FROM skills WHERE skill_key=?", (sk,)
+        ).fetchone()
+        if not skill:
+            continue
+
+        new_weight = skill["weight"] * factor
+        if new_weight < 0.1:
+            conn.execute("DELETE FROM skills WHERE id=?", (skill["id"],))
+        else:
+            conn.execute(
+                "UPDATE skills SET weight=?, last_used=? WHERE id=?",
+                (new_weight, now, skill["id"]),
+            )
+        updated += 1
+
+    if updated:
+        conn.commit()
+
+    return updated

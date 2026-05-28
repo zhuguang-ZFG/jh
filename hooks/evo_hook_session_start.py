@@ -137,6 +137,11 @@ def _accumulate_injection(data):
     if not sections:
         return
 
+    skill_keys = [
+        s.get("skill_key", "") for s in data.get("skills", [])
+        if s.get("skill_key")
+    ]
+
     try:
         import sys as _sys
         parent = os.path.dirname(os.path.abspath(__file__))
@@ -149,6 +154,7 @@ def _accumulate_injection(data):
             skill_count=len(data.get("skills", [])),
             pattern_count=len(data.get("patterns", [])),
             has_fix_code=any(f.get("fix_code") for f in data.get("failures", [])),
+            skill_keys=skill_keys,
         )
     except ImportError:
         pass
