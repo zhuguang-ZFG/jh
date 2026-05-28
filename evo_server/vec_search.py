@@ -132,8 +132,8 @@ def _vec_search_raw(conn, vec_table: str, content_table: str,
             if domain and d.get("domain") != domain:
                 continue
             if min_weight > 0:
-                wcol = "weight" if "weight" in d else "confidence"
-                if d.get(wcol, 0) < min_weight:
+                wcol = "weight" if "weight" in d else ("confidence" if "confidence" in d else "")
+                if wcol and d.get(wcol, 0) < min_weight:
                     continue
             result.append(d)
 
@@ -191,8 +191,8 @@ def _bm25_search(conn, fts_table: str, content_table: str,
             if domain and d.get("domain") != domain:
                 continue
             if min_weight > 0:
-                wcol = "weight" if "weight" in d else "confidence"
-                if d.get(wcol, 0) < min_weight:
+                wcol = "weight" if "weight" in d else ("confidence" if "confidence" in d else "")
+                if wcol and d.get(wcol, 0) < min_weight:
                     continue
             result.append(d)
 
@@ -275,15 +275,18 @@ def _like_fallback(conn, table: str, query: str, limit: int,
                    min_weight: float, domain: str) -> List[dict]:
     """Fallback LIKE-based search when both vec and FTS5 are unavailable."""
     keywords = [w.lower() for w in query.split() if len(w) >= 3][:5]
+    # Determine sort column — not all tables have weight/confidence
+    wcol = _sort_column(table)
+
     if not keywords:
-        wcol = "weight" if table == "skills" else "confidence"
-        where = f"WHERE {wcol} > ?" if min_weight > 0 else ""
-        params = [min_weight] if min_weight > 0 else []
+        where = f"WHERE {wcol} > ?" if min_weight > 0 and wcol else ""
+        params = [min_weight] if min_weight > 0 and wcol else []
         if domain:
             where = f"{where} AND domain=?" if where else "WHERE domain=?"
             params.append(domain)
+        order = f"ORDER BY {wcol} DESC" if wcol else ""
         rows = conn.execute(
-            f"SELECT * FROM {table} {where} ORDER BY {wcol} DESC LIMIT ?",
+            f"SELECT * FROM {table} {where} {order} LIMIT ?",
             params + [limit],
         ).fetchall()
         return [_add_neutral_score(dict(r)) for r in rows]
@@ -301,16 +304,25 @@ def _like_fallback(conn, table: str, query: str, limit: int,
         where += " AND domain=?"
         like_params.append(domain)
 
-    wcol = "weight" if table == "skills" else "confidence"
-    if min_weight > 0:
+    if min_weight > 0 and wcol:
         where += f" AND {wcol} > ?"
         like_params.append(min_weight)
 
+    order = f"ORDER BY {wcol} DESC" if wcol else ""
     rows = conn.execute(
-        f"SELECT * FROM {table} WHERE {where} ORDER BY {wcol} DESC LIMIT ?",
+        f"SELECT * FROM {table} WHERE {where} {order} LIMIT ?",
         like_params + [limit],
     ).fetchall()
     return [_add_neutral_score(dict(r)) for r in rows]
+
+
+def _sort_column(table: str) -> str:
+    """Return the sort/weight column for a table, or '' if none exists."""
+    return {
+        "skills": "weight",
+        "patterns": "confidence",
+        "memories": "weight",
+    }.get(table, "")
 
 
 def _search_columns(table: str) -> List[str]:
