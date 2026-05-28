@@ -114,12 +114,18 @@ def sync_row_embedding(conn: sqlite3.Connection, content_table: str,
     text_fields = config["text_fields"]
 
     # Build search text
+    extra_parts = [
+        row_data.get("error_type", ""),
+        row_data.get("fix_suggestion", ""),
+        row_data.get("when_to_use", ""),
+        row_data.get("anti_patterns", ""),
+    ]
     text = build_search_text(
         name=row_data.get("name", ""),
         domain=row_data.get("domain", ""),
         description=row_data.get("description", row_data.get("pattern", "")),
         pattern=row_data.get("pattern", ""),
-        extra=row_data.get("error_type", "") + " " + row_data.get("fix_suggestion", ""),
+        extra=" ".join(p for p in extra_parts if p),
         code_example=row_data.get("code_example", ""),
     )
 

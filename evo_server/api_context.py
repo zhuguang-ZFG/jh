@@ -364,6 +364,10 @@ def _format_skill(row):
     }
     if r.get("code_example"):
         result["code_example"] = r["code_example"][:300]
+    if r.get("when_to_use"):
+        result["when_to_use"] = r["when_to_use"][:200]
+    if r.get("anti_patterns"):
+        result["anti_patterns"] = r["anti_patterns"][:200]
     return result
 
 

@@ -116,6 +116,7 @@ def _extract_from_content(content: str, language: str, filepath: str) -> List[Di
             "domain": p.get("domain", "general"),
             "pattern": p.get("description", "")[:200],
             "code_example": code_example[:300],
+            "when_to_use": p.get("when_to_use", _infer_when_to_use(p)),
             "weight": p.get("confidence", 0.5),
             "source": "git_diff",
         })
@@ -210,3 +211,26 @@ def _domain_from_path(filepath: str) -> str:
     if any(k in fp for k in ("hook", "evo")):
         return "python"
     return "general"
+
+
+def _infer_when_to_use(pattern: dict) -> str:
+    """Infer when_to_use from pattern domain, name, and description."""
+    domain = pattern.get("domain", "general")
+    name = pattern.get("name", "")
+    desc = pattern.get("description", "").lower()
+
+    if domain == "api" or "route" in name:
+        return "When implementing API endpoints or request handlers"
+    if domain == "testing" or name.startswith("test_"):
+        return "When writing tests or test fixtures"
+    if domain == "data" or any(k in desc for k in ("model", "schema", "database")):
+        return "When defining data models or database schemas"
+    if domain == "devops":
+        return "When configuring deployment or CI/CD"
+    if "class_" in name:
+        return "When designing class-based abstractions"
+    if "async" in desc:
+        return "When implementing async/concurrent operations"
+    if any(k in desc for k in ("error", "exception", "handle")):
+        return "When handling errors or exceptions"
+    return ""

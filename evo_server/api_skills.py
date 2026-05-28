@@ -28,6 +28,8 @@ def create_skill(
     domain: str = Body("general"),
     pattern: str = Body(""),
     code_example: str = Body(""),
+    when_to_use: str = Body(""),
+    anti_patterns: str = Body(""),
     weight: float = Body(1.0),
     source: str = Body("manual"),
 ):
@@ -38,16 +40,16 @@ def create_skill(
     key = hashlib.sha256(f"{name}:{domain}:{pattern[:80]}".encode()).hexdigest()[:16]
     try:
         conn.execute(
-            """INSERT INTO skills (skill_key, name, domain, pattern, code_example, weight, use_count, success_count, created_at, last_used, source)
-               VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, 0, ?)""",
-            (key, name, domain, pattern, code_example, weight, now, source),
+            """INSERT INTO skills (skill_key, name, domain, pattern, code_example, when_to_use, anti_patterns, weight, use_count, success_count, created_at, last_used, source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, 0, ?)""",
+            (key, name, domain, pattern, code_example, when_to_use, anti_patterns, weight, now, source),
         )
         row_id = conn.execute("SELECT id FROM skills WHERE skill_key=?", (key,)).fetchone()["id"]
         _sync_skill_embedding(conn, row_id, name, domain, pattern, code_example)
     except conn.IntegrityError:
         conn.execute(
-            "UPDATE skills SET pattern=?, code_example=?, weight=MAX(weight,?), last_used=? WHERE skill_key=?",
-            (pattern, code_example, weight, now, key),
+            "UPDATE skills SET pattern=?, code_example=?, when_to_use=?, anti_patterns=?, weight=MAX(weight,?), last_used=? WHERE skill_key=?",
+            (pattern, code_example, when_to_use, anti_patterns, weight, now, key),
         )
         row_id = conn.execute("SELECT id FROM skills WHERE skill_key=?", (key,)).fetchone()["id"]
         _sync_skill_embedding(conn, row_id, name, domain, pattern, code_example)
@@ -60,6 +62,8 @@ class SkillItem(BaseModel):
     domain: str = "general"
     pattern: str = ""
     code_example: str = ""
+    when_to_use: str = ""
+    anti_patterns: str = ""
     weight: float = 1.0
     source: str = "session"
 
@@ -80,18 +84,18 @@ def batch_create_skills(req: BatchSkillRequest):
         key = hashlib.sha256(f"{s.name}:{s.domain}:{s.pattern[:80]}".encode()).hexdigest()[:16]
         try:
             conn.execute(
-                """INSERT INTO skills (skill_key, name, domain, pattern, code_example, weight,
+                """INSERT INTO skills (skill_key, name, domain, pattern, code_example, when_to_use, anti_patterns, weight,
                    use_count, success_count, created_at, last_used, source)
-                   VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, 0, ?)""",
-                (key, s.name, s.domain, s.pattern, s.code_example, s.weight, now, s.source),
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, 0, ?)""",
+                (key, s.name, s.domain, s.pattern, s.code_example, s.when_to_use, s.anti_patterns, s.weight, now, s.source),
             )
             row_id = conn.execute("SELECT id FROM skills WHERE skill_key=?", (key,)).fetchone()["id"]
             _sync_skill_embedding(conn, row_id, s.name, s.domain, s.pattern, s.code_example)
             created += 1
         except conn.IntegrityError:
             conn.execute(
-                "UPDATE skills SET pattern=?, code_example=?, weight=MAX(weight,?), last_used=? WHERE skill_key=?",
-                (s.pattern, s.code_example, s.weight, now, key),
+                "UPDATE skills SET pattern=?, code_example=?, when_to_use=?, anti_patterns=?, weight=MAX(weight,?), last_used=? WHERE skill_key=?",
+                (s.pattern, s.code_example, s.when_to_use, s.anti_patterns, s.weight, now, key),
             )
             row_id = conn.execute("SELECT id FROM skills WHERE skill_key=?", (key,)).fetchone()["id"]
             _sync_skill_embedding(conn, row_id, s.name, s.domain, s.pattern, s.code_example)

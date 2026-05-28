@@ -17,7 +17,7 @@ VEC_TABLES = {
     "skills": {
         "vec_table": "skills_vec",
         "fts_table": "skills_fts",
-        "text_fields": ["name", "domain", "pattern"],
+        "text_fields": ["name", "domain", "pattern", "when_to_use", "anti_patterns"],
     },
     "patterns": {
         "vec_table": "patterns_vec",

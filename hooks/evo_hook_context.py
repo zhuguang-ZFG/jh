@@ -229,6 +229,10 @@ def format_context(all_data):
         lines.append("## Relevant Skills")
         for s in skills[:3]:
             lines.append(f"- **{s['name']}** [{s['domain']}]: {s.get('pattern', '')[:100]}")
+            if s.get("when_to_use"):
+                lines.append(f"  When: {s['when_to_use'][:100]}")
+            if s.get("anti_patterns"):
+                lines.append(f"  Avoid: {s['anti_patterns'][:100]}")
             if s.get("code_example"):
                 lines.append(f"  Example: {s['code_example'][:120]}")
 

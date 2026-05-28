@@ -292,6 +292,16 @@ def get_conn() -> sqlite3.Connection:
             except Exception:
                 pass
 
+        # Phase 3: when_to_use + anti_patterns on skills
+        for col, typedef in [
+            ("when_to_use", "TEXT DEFAULT ''"),
+            ("anti_patterns", "TEXT DEFAULT ''"),
+        ]:
+            try:
+                _conn.execute(f"ALTER TABLE skills ADD COLUMN {col} {typedef}")
+            except Exception:
+                pass
+
         # Load sqlite-vec extension + create vec tables
         _init_vec_tables(_conn)
         # Create FTS5 tables for BM25 search
@@ -347,7 +357,7 @@ def _init_fts_tables(conn: sqlite3.Connection):
     older SQLite versions, so vec_search uses position-based ranking instead.
     """
     fts_defs = [
-        ("skills_fts", "skills", ["name", "domain", "pattern"]),
+        ("skills_fts", "skills", ["name", "domain", "pattern", "when_to_use", "anti_patterns"]),
         ("patterns_fts", "patterns", ["name", "domain", "description"]),
         ("failures_fts", "failure_patterns", ["error_type", "description", "fix_suggestion", "fix_code", "domain"]),
         ("memories_fts", "memories", ["content", "domain", "category"]),
@@ -355,8 +365,11 @@ def _init_fts_tables(conn: sqlite3.Connection):
     for fts_table, content_table, columns in fts_defs:
         cols = ", ".join(columns)
         try:
+            # Drop + recreate to pick up schema changes (e.g. new columns)
+            # Safe because content= external content — data lives in content table
+            conn.execute(f"DROP TABLE IF EXISTS {fts_table}")
             conn.execute(
-                f"CREATE VIRTUAL TABLE IF NOT EXISTS {fts_table} "
+                f"CREATE VIRTUAL TABLE {fts_table} "
                 f"USING fts5({cols}, content={content_table}, content_rowid=id)"
             )
         except Exception as e:
@@ -368,7 +381,7 @@ def _init_fts_tables(conn: sqlite3.Connection):
     # Note: DELETE on content= FTS tables doesn't work on older SQLite,
     # so we rely on startup rebuild for deletions.
     trigger_defs = [
-        ("skills", "skills_fts", ["name", "domain", "pattern"]),
+        ("skills", "skills_fts", ["name", "domain", "pattern", "when_to_use", "anti_patterns"]),
         ("patterns", "patterns_fts", ["name", "domain", "description"]),
         ("failure_patterns", "failures_fts", ["error_type", "description", "fix_suggestion", "fix_code", "domain"]),
         ("memories", "memories_fts", ["content", "domain", "category"]),
