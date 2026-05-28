@@ -1,14 +1,17 @@
 """Skills management with EMA weight updates."""
 import hashlib
 import time
+import json as _json
+import logging
 from fastapi import APIRouter, Body
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Optional
 from .db import get_conn
 from .models import SkillRecall, SkillUpdate, ApiResponse
 from . import config
 from .vec_search import vec_search
 
+logger = logging.getLogger("evo.skills")
 router = APIRouter(prefix="/skills", tags=["skills"])
 
 
@@ -103,6 +106,160 @@ def batch_create_skills(req: BatchSkillRequest):
 
     conn.commit()
     return ApiResponse(ok=True, data={"created": created, "updated": updated})
+
+
+# ── Quality Gatekeeper ──────────────────────────────────────────
+
+
+class GatekeepSkillItem(BaseModel):
+    name: str
+    domain: str = "general"
+    pattern: str = ""
+    weight: float = 1.0
+
+
+class GatekeepRequest(BaseModel):
+    skills: List[GatekeepSkillItem] = Field(..., min_length=1, max_length=20)
+    user_task: str = ""
+
+
+_GATEKEEP_NOISE_PREFIXES = (
+    "session_", "bash_", "created_module_", "created_func_",
+    "created_router_", "edit_pattern_", "framework_", "deploy_",
+)
+_GATEKEEP_NOISE_KEYWORDS = (
+    "files touched", "commands", "tool calls", "files,", "edits,",
+)
+
+
+def _heuristic_gatekeep(name: str, pattern: str) -> dict:
+    """Rule-based fallback when LLM is unavailable."""
+    if any(name.startswith(p) for p in _GATEKEEP_NOISE_PREFIXES):
+        return {"verdict": "discard", "confidence": 0.9,
+                "reason": f"Name prefix matches noise pattern"}
+    pat_lower = pattern.lower()
+    if any(k in pat_lower for k in _GATEKEEP_NOISE_KEYWORDS):
+        return {"verdict": "discard", "confidence": 0.85,
+                "reason": "Pattern contains session statistics, not reusable knowledge"}
+    if len(pattern) < 20:
+        return {"verdict": "discard", "confidence": 0.8,
+                "reason": "Pattern too vague (<20 chars)"}
+    return {"verdict": "keep", "confidence": 0.5,
+            "reason": "Heuristic default: keep when uncertain"}
+
+
+async def _gatekeep_with_llm(skills: list, user_task: str) -> list:
+    """Use LLM to judge skill quality. Returns list of {name, verdict, confidence, reason}."""
+    from .llm_bridge import chat
+
+    skills_text = ""
+    for i, s in enumerate(skills):
+        skills_text += f"{i+1}. {s['name']} [{s.get('domain','')}]: {s.get('pattern','')[:120]}\n"
+
+    system = (
+        "You are a code skill quality gatekeeper. Determine if each auto-extracted "
+        "skill is worth storing. Keep ONLY skills with PROJECT-SPECIFIC knowledge "
+        "Claude cannot know from training data.\n\n"
+        "DISCARD: generic patterns (FastAPI Body(), SQLite basics, git commands)\n"
+        "DISCARD: session statistics (file counts, command counts, tool counts)\n"
+        "DISCARD: vague one-liners with no actionable content\n"
+        "KEEP: project-specific conventions, known pitfalls in THIS codebase\n"
+        "KEEP: user's explicit preferences, corrections, naming conventions\n"
+        "KEEP: stack-specific gotchas discovered through real failures\n\n"
+        "Return JSON array only:\n"
+        '[{"skill_name": "exact name from input", "verdict": "keep"|"discard", '
+        '"confidence": 0.0-1.0, "reason": "one sentence"}]'
+    )
+
+    user_msg = f"Task: {user_task[:200] or 'unknown'}\nSkills:\n{skills_text}\nJudge each skill."
+
+    try:
+        response = await chat(user_msg, system=system, temperature=0.2, max_backends=3)
+    except Exception as e:
+        logger.warning(f"Gatekeep LLM failed: {e}")
+        return []
+
+    if not response or response.startswith("Error:"):
+        return []
+
+    # Parse response
+    try:
+        data = _json.loads(response.strip())
+        if isinstance(data, list):
+            return data
+    except _json.JSONDecodeError:
+        pass
+
+    # Fallback: extract JSON array
+    import re
+    match = re.search(r"\[.*\]", response, re.DOTALL)
+    if match:
+        try:
+            data = _json.loads(match.group())
+            if isinstance(data, list):
+                return data
+        except _json.JSONDecodeError:
+            pass
+
+    return []
+
+
+@router.post("/gatekeep")
+async def gatekeep_skills(req: GatekeepRequest):
+    """LLM quality check on auto-extracted skills. Falls back to heuristic rules."""
+    results = []
+
+    # Try LLM first
+    llm_results = await _gatekeep_with_llm(
+        [{"name": s.name, "domain": s.domain, "pattern": s.pattern}
+         for s in req.skills],
+        req.user_task,
+    )
+
+    if llm_results:
+        # Build lookup from LLM response
+        llm_map = {}
+        for r in llm_results:
+            name = r.get("skill_name", "")
+            llm_map[name] = {
+                "verdict": r.get("verdict", "keep"),
+                "confidence": r.get("confidence", 0.5),
+                "reason": r.get("reason", ""),
+            }
+        for s in req.skills:
+            if s.name in llm_map:
+                results.append({
+                    "name": s.name,
+                    **llm_map[s.name],
+                    "source": "llm",
+                })
+            else:
+                results.append({
+                    "name": s.name,
+                    "verdict": "keep",
+                    "confidence": 0.3,
+                    "reason": "LLM did not judge this skill",
+                    "source": "fallback",
+                })
+    else:
+        # LLM failed — use heuristic for all
+        for s in req.skills:
+            h = _heuristic_gatekeep(s.name, s.pattern)
+            results.append({
+                "name": s.name,
+                **h,
+                "source": "heuristic",
+            })
+
+    kept = sum(1 for r in results if r["verdict"] == "keep")
+    discarded = len(results) - kept
+    logger.info(f"Gatekeep: {kept} kept, {discarded} discarded "
+                f"(source={results[0]['source'] if results else 'none'})")
+
+    return ApiResponse(ok=True, data={
+        "results": results,
+        "summary": {"kept": kept, "discarded": discarded, "total": len(results)},
+    })
 
 
 @router.get("/")

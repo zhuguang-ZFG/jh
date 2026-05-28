@@ -138,6 +138,42 @@ def main():
     skills = extract_skills(transcript_data, changed_files, outcome)
     skills_saved = 0
     if skills:
+        # Build user task for gatekeep context
+        user_task = ""
+        if transcript_data and transcript_data.get("user_messages"):
+            user_task = transcript_data["user_messages"][0][:200]
+
+        # Gatekeep: filter out noise skills via LLM (or heuristic fallback)
+        try:
+            gate_result = api("POST", "/skills/gatekeep", {
+                "skills": [{
+                    "name": s["name"],
+                    "domain": s["domain"],
+                    "pattern": s["pattern"],
+                    "weight": s["weight"],
+                } for s in skills],
+                "user_task": user_task,
+            })
+        except Exception:
+            gate_result = None
+
+        gated_skills = []
+        if gate_result and gate_result.get("ok"):
+            gd = gate_result.get("data", {})
+            verdicts = {r["name"]: r for r in gd.get("results", [])}
+            for s in skills:
+                v = verdicts.get(s["name"], {})
+                if v.get("verdict") == "discard":
+                    s["weight"] = 0.05  # near-eviction
+                gated_skills.append(s)
+            kept = gd.get("summary", {}).get("kept", len(skills))
+            discarded = gd.get("summary", {}).get("discarded", 0)
+            gate_source = (gd.get("results", [{}])[0].get("source", "none")
+                          if gd.get("results") else "none")
+        else:
+            gated_skills = skills
+
+        # Save skills (gatekept)
         batch_result = api("POST", "/skills/batch", {
             "skills": [{
                 "name": s["name"],
@@ -145,11 +181,15 @@ def main():
                 "pattern": s["pattern"],
                 "weight": s["weight"],
                 "source": "session",
-            } for s in skills],
+            } for s in gated_skills],
         })
         if batch_result and batch_result.get("ok"):
             bd = batch_result.get("data", {})
             skills_saved = bd.get("created", 0) + bd.get("updated", 0)
+
+        if gate_result and gate_result.get("ok"):
+            print(f"[evo] gatekeep: {kept} kept, {discarded} discarded "
+                  f"({gate_source})", file=sys.stderr)
 
     # Flush accumulated injection data with real session_id
     injections_flushed = flush_injections(session_id)
