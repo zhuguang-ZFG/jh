@@ -1,5 +1,5 @@
 """LLM integration endpoint (LongCat API, formerly LiMa)."""
-import json
+import json as _json
 import time
 import re
 import logging
@@ -34,8 +34,8 @@ async def trigger_sync():
 
     suggestions = []
     try:
-        suggestions = json.loads(response)
-    except json.JSONDecodeError:
+        suggestions = _json.loads(response)
+    except _json.JSONDecodeError:
         pass
 
     # Store suggestions as meta_rules
@@ -43,7 +43,7 @@ async def trigger_sync():
     now = time.time()
     if suggestions:
         key = "llm_suggestions"
-        value = json.dumps(suggestions, ensure_ascii=False)
+        value = _json.dumps(suggestions, ensure_ascii=False)
         try:
             conn.execute(
                 """INSERT INTO meta_rules (rule_key, rule_value, category, created_at)
