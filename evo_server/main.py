@@ -506,6 +506,25 @@ def request_stats():
     return {"ok": True, "paths": result}
 
 
+# --- Auto-deploy ---
+import subprocess as _subprocess
+
+
+@app.post("/deploy")
+def auto_deploy():
+    """Trigger git pull + restart via deploy.sh in background.
+
+    Spawns deploy.sh as independent process — response returns
+    BEFORE the service restarts, so the HTTP response is clean.
+    """
+    _subprocess.Popen(
+        ["/bin/bash", "/opt/evo-server/deploy.sh"],
+        stdout=_subprocess.DEVNULL, stderr=_subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return {"ok": True, "message": "Deploy triggered — check Telegram for result"}
+
+
 # --- Telegram webhook ---
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
