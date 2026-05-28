@@ -8,9 +8,10 @@ logger = logging.getLogger("evo.fts")
 
 # FTS table definitions: (content_table, fts_table, indexed_columns)
 _FTS_TABLES = [
-    ("skills", "skills_fts", ["name", "domain", "pattern", "description"]),
-    ("patterns", "patterns_fts", ["name", "domain", "description", "code_example"]),
-    ("failure_patterns", "failures_fts", ["error_type", "description", "fix_suggestion", "domain"]),
+    ("skills", "skills_fts", ["name", "domain", "pattern"]),
+    ("patterns", "patterns_fts", ["name", "domain", "description"]),
+    ("failure_patterns", "failures_fts", ["error_type", "description", "fix_suggestion", "fix_code", "domain"]),
+    ("memories", "memories_fts", ["content", "domain", "category"]),
 ]
 
 

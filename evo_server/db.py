@@ -294,6 +294,8 @@ def get_conn() -> sqlite3.Connection:
 
         # Load sqlite-vec extension + create vec tables
         _init_vec_tables(_conn)
+        # Create FTS5 tables for BM25 search
+        _init_fts_tables(_conn)
     return _conn
 
 
@@ -336,3 +338,31 @@ def _init_vec_tables(conn: sqlite3.Connection):
             logger.warning(f"Create {vec_table} failed: {e}")
 
     conn.commit()
+
+
+def _init_fts_tables(conn: sqlite3.Connection):
+    """Create FTS5 virtual tables for BM25 search."""
+    fts_defs = [
+        ("skills_fts", "skills", ["name", "domain", "pattern"]),
+        ("patterns_fts", "patterns", ["name", "domain", "description"]),
+        ("failures_fts", "failure_patterns", ["error_type", "description", "fix_suggestion", "fix_code", "domain"]),
+        ("memories_fts", "memories", ["content", "domain", "category"]),
+    ]
+    for fts_table, content_table, columns in fts_defs:
+        cols = ", ".join(columns)
+        try:
+            conn.execute(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS {fts_table} "
+                f"USING fts5({cols}, content={content_table}, content_rowid=id)"
+            )
+        except Exception as e:
+            logger.warning(f"Create {fts_table} failed: {e}")
+
+    conn.commit()
+
+    # Initial rebuild if tables are empty
+    from . import fts_sync
+    try:
+        fts_sync.rebuild_all_fts(conn)
+    except Exception as e:
+        logger.debug(f"FTS initial rebuild skipped: {e}")
