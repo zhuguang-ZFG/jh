@@ -441,6 +441,41 @@ def extract_memories(transcript_data, changed_files, outcome, domain):
     return unique[:5]
 
 
+def extract_corrections(transcript_data):
+    """Extract user corrections from session transcript.
+
+    Scans user messages for correction signals like "不要/改成/应该是/错了/no/don't/instead".
+    Returns list of {trigger, correct_behavior, domain, confidence} for server-side LLM structuring.
+    """
+    if not transcript_data:
+        return []
+
+    user_msgs = transcript_data.get("user_messages", [])
+    if not user_msgs:
+        return []
+
+    correction_signals = [
+        "不要", "改成", "应该是", "错了", "不对", "别", "应当是",
+        "no,", "don't", "instead", "should be", "wrong", "incorrect",
+        "never", "always", "prefer", "avoid",
+    ]
+
+    corrections = []
+    for msg in user_msgs:
+        if _is_noise_message(msg):
+            continue
+        if _is_credential_content(msg):
+            continue
+        text_lower = msg.lower()
+        if any(k.lower() in text_lower for k in correction_signals) and len(msg) > 20:
+            corrections.append({
+                "raw_text": msg[:300],
+                "confidence": 0.7,
+            })
+
+    return corrections[:5]
+
+
 def generate_quality_snapshot(transcript_data, changed_files, git_diff, outcome, session_id):
     """Generate quality metrics from session data for quality_snapshots table.
 

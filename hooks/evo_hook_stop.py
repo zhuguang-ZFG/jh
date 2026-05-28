@@ -15,6 +15,7 @@ import subprocess
 
 from evo_hook_common import (
     api, parse_transcript, infer_domain, extract_skills, extract_memories,
+    extract_corrections,
     read_changed_files, flush_injections, generate_quality_snapshot, TRACKER_FILE,
 )
 
@@ -190,6 +191,22 @@ def main():
         if gate_result and gate_result.get("ok"):
             print(f"[evo] gatekeep: {kept} kept, {discarded} discarded "
                   f"({gate_source})", file=sys.stderr)
+
+    # Extract and ingest user corrections (highest-quality signal)
+    corrections = extract_corrections(transcript_data)
+    corrections_saved = 0
+    if corrections:
+        try:
+            corr_result = api("POST", "/lima/corrections", {
+                "corrections": corrections,
+                "session_id": session_id,
+            })
+            if corr_result and corr_result.get("ok"):
+                corrections_saved = corr_result.get("data", {}).get("saved", 0)
+        except Exception:
+            pass
+        if corrections_saved:
+            print(f"[evo] {corrections_saved} corrections saved", file=sys.stderr)
 
     # Flush accumulated injection data with real session_id
     injections_flushed = flush_injections(session_id)
