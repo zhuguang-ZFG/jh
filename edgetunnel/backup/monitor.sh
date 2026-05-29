@@ -10,16 +10,18 @@ send_alert() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') ALERT: $1" >> "$LOG"
 }
 
-if ! systemctl is-active --quiet xray; then
-    send_alert "🔴 Xray 已停止，正在重启..."
+STATUS="OK"
+
+# Check Xray process
+if ! pgrep -x xray > /dev/null 2>&1; then
+    send_alert "🔴 Xray 进程不存在，正在重启..."
     systemctl restart xray
-    sleep 2
-    systemctl is-active --quiet xray && send_alert "✅ Xray 重启成功" || send_alert "❌ Xray 重启失败"
+    sleep 3
+    pgrep -x xray > /dev/null 2>&1 && send_alert "✅ Xray 重启成功" || { send_alert "❌ Xray 重启失败"; STATUS="FAIL"; }
 fi
 
+# Check CF Workers
 CF_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "https://vless.donglicao.com/" 2>/dev/null)
-[ "$CF_CODE" != "200" ] && send_alert "🔴 CF Workers 不可达! HTTP: ${CF_CODE}"
+[ "$CF_CODE" != "200" ] && { send_alert "🔴 CF Workers 不可达! HTTP: ${CF_CODE}"; STATUS="FAIL"; }
 
-! ss -tlnp | grep -q ":10086" && send_alert "🔴 端口 10086 未监听!"
-
-echo "$(date '+%Y-%m-%d %H:%M:%S') OK - xray:$(systemctl is-active xray) cf:${CF_CODE}" >> "$LOG"
+echo "$(date '+%Y-%m-%d %H:%M:%S') ${STATUS} - xray:$(pgrep -x xray > /dev/null 2>&1 && echo active || echo dead) cf:${CF_CODE}" >> "$LOG"
