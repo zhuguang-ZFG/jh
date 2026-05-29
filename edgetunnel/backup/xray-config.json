@@ -1,0 +1,42 @@
+{
+  "log": {"loglevel": "warning"},
+  "inbounds": [{
+    "tag": "vless-in",
+    "port": 10086,
+    "listen": "0.0.0.0",
+    "protocol": "vless",
+    "settings": {
+      "clients": [{"id": "43f00275-3bfe-40b3-b83f-c645c3cb5d03"}],
+      "decryption": "none"
+    },
+    "streamSettings": {
+      "network": "tcp",
+      "security": "tls",
+      "tlsSettings": {
+        "serverName": "vless.donglicao.com",
+        "certificates": [{
+          "certificateFile": "/etc/xray/cert/cert.pem",
+          "keyFile": "/etc/xray/cert/key.pem"
+        }]
+      }
+    }
+  }],
+  "outbounds": [{
+    "tag": "cf-relay",
+    "protocol": "vless",
+    "settings": {
+      "vnext": [{
+        "address": "104.16.132.229",
+        "port": 443,
+        "users": [{"id": "24938c76-d423-4155-8431-52edc80b0325", "encryption": "none"}]
+      }]
+    },
+    "streamSettings": {
+      "network": "ws",
+      "security": "tls",
+      "tlsSettings": {"serverName": "vless.donglicao.com"},
+      "wsSettings": {"path": "/", "headers": {"Host": "vless.donglicao.com"}}
+    }
+  }],
+  "routing": {"domainStrategy": "AsIs", "rules": []}
+}
