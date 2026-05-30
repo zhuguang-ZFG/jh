@@ -44,13 +44,7 @@
 - **功能**: DCA 策略、热点追踪、视频生成、产品搜索
 - **通知**: Telegram bot @claude_zhubot
 
-### 3. evo-server (进化引擎)
-- **状态**: ⚠️ 部分部署
-- **位置**: VPS `/opt/evo-server/`
-- **组件**: learning engine, backup, data
-- **详见**: `docs/evo-setup-guide.md`
-
-### 4. MediaCrawler (媒体爬虫)
+### 3. MediaCrawler (媒体爬虫)
 - **位置**: `MediaCrawler/`
 
 ---
