@@ -1,0 +1,10 @@
+compatibility_date = "2026-01-20"
+name = "cfnew"
+main = "_worker.js"
+
+[[kv_namespaces]]
+binding = "C"
+id = "9cf010f4ea9249d1bdbf747101ca6ac5"
+
+[vars]
+u = "34b406bf-bb6f-409e-8835-f66ed4bd8946"

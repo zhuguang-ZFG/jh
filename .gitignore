@@ -12,3 +12,8 @@ __pycache__/
 data/
 logs/
 node_modules/
+
+# Secrets & local config
+.env.ai_router
+.mcp.json
+*.zip

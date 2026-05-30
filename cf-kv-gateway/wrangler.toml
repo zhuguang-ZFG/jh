@@ -1,0 +1,14 @@
+compatibility_date = "2026-01-20"
+name = "kv-gateway"
+main = "worker.js"
+
+[[routes]]
+pattern = "kv.zhuguang.ccwu.cc/*"
+zone_name = "zhuguang.ccwu.cc"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "cd72b7216ce4483a9f90f7252a6ec27e"
+
+[vars]
+TOKEN = "ai-router-kv-2026"

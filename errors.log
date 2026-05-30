@@ -1,0 +1,3 @@
+"[$(date)] Error on vps: ENOENT: no such file or directory, open 'C:\Users\zhugu\Downloads\zhuguang.pem'" 
+"[$(date)] Error on vps: Timed out while waiting for handshake" 
+"[$(date)] Error on vps: Connection lost before handshake" 
