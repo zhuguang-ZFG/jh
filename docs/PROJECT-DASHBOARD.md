@@ -36,6 +36,7 @@
 - **架构**: U1(电机) + U8(AI语音) + Server(Python/Java) + 小程序(uni-app)
 - **下一步**: 硬件在环测试
 - **详见**: `esp32S_XYZ/STATUS.md`, `esp32S_XYZ/docs/`
+- **AI 资源**: `docs/esp32-ai-resources.md` — ESP-Claw、MCP 工具清单、免费 AI API、打通计划
 
 ### 2. ai-quant (量化交易)
 - **状态**: ✅ 运行中
